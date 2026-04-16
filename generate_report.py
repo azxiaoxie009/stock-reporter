@@ -36,41 +36,67 @@ SMTP_PORT = 465
 def fetch_quotes():
     """
     获取A股+港股主要指数实时行情
-    A股字段: [0]=名称 [1]=现价 [2]=昨收 [3]=最高 [4]=最低 [5]=今开
-    港股字段: [0]=代码 [1]=名称 [2]=代码2 [3]=昨收 [4]=今开 [5]=现价 [6]=最高 [7]=涨跌额 [8]=涨跌幅%
+    A股指数: 东方财富 push2.eastmoney.com API (字段: f2=现价 f3=涨跌幅% f4=涨跌额 f18=昨收 f15=最高 f16=最低)
+    港股指数: 新浪 hq.sinajs.cn API (parts[3]=昨收 parts[5]=现价 parts[7]=涨跌额 parts[8]=涨跌幅%)
     """
+    result = {}
+
+    # ── A股: 东方财富 ─────────────────────────
     try:
         r = requests.get(
-            "http://hq.sinajs.cn/list=sh000001,sz399001,sz399006,hkHSI,hkHSTECH",
+            "https://push2.eastmoney.com/api/qt/ulist.np/get"
+            "?fltt=2&invt=2"
+            "&fields=f2,f3,f4,f15,f16,f18,f12,f14"
+            "&secids=1.000001,0.399001,0.399006"
+            "&ut=fa5fd1943c7b386f172d6893dbfba10b",
+            headers={"Referer":"https://quote.eastmoney.com",
+                     "User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        d = r.json()
+        key_map = {"000001":"sh000001","399001":"sz399001","399006":"sz399006"}
+        for item in d.get("data",{}).get("diff",[]):
+            code = str(item.get("f12",""))
+            key = key_map.get(code, "")
+            if not key: continue
+            result[key] = {
+                "name": item.get("f14",""),
+                "close": float(item.get("f2",0) or 0),
+                "pct":  float(item.get("f3",0) or 0),
+                "change": float(item.get("f4",0) or 0),
+                "high": float(item.get("f15",0) or 0),
+                "low":  float(item.get("f16",0) or 0),
+                "prev_close": float(item.get("f18",0) or 0),
+            }
+    except Exception as e:
+        print(f"东方财富行情获取失败: {e}")
+
+    # ── 港股: 新浪 ─────────────────────────────
+    try:
+        r = requests.get(
+            "http://hq.sinajs.cn/list=hkHSI,hkHSTECH",
             headers={"Referer":"http://finance.sina.com.cn"}, timeout=10)
         r.encoding = "gbk"
-        result = {}
         for line in r.text.strip().split("\n"):
             if "=" not in line: continue
             key = line.split("=")[0].split("_")[-1]
             val = line.split('"')[1] if '"' in line else ""
             parts = val.split(",")
-            if len(parts) < 4: continue
-            if key in ("hkHSI", "hkHSTECH"):
-                # 港股格式
-                close = float(parts[5]) if parts[5] else 0
-                prev_close = float(parts[3]) if parts[3] else close
-                pct = float(parts[8]) if parts[8] else 0.0
-                change = float(parts[7]) if parts[7] else 0.0
-                result[key] = {"name": parts[1], "close": close,
-                               "pct": pct, "change": change}
-            else:
-                # A股格式：无pct字段，需手动计算
-                close = float(parts[1]) if parts[1] else 0
-                prev_close = float(parts[2]) if parts[2] else close
-                pct = (close - prev_close) / prev_close * 100 if prev_close else 0.0
-                change = close - prev_close
-                result[key] = {"name": parts[0], "close": close,
-                               "pct": pct, "change": change}
-        return result
+            if len(parts) < 9: continue
+            close = float(parts[5]) if parts[5] else 0
+            prev_close = float(parts[3]) if parts[3] else close
+            pct = float(parts[8]) if parts[8] else 0.0
+            change = float(parts[7]) if parts[7] else 0.0
+            result[key] = {
+                "name": parts[1],
+                "close": close,
+                "pct": pct,
+                "change": change,
+                "prev_close": prev_close,
+            }
     except Exception as e:
-        print(f"行情获取失败: {e}")
-        return {}
+        print(f"港股行情获取失败: {e}")
+
+    return result
 
 def fetch_us_quotes():
     """获取昨夜美股数据（纳指/道指/标普500）via Yahoo Finance"""
