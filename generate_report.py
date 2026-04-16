@@ -16,6 +16,7 @@ except AttributeError:
 
 # ── 用户配置 ─────────────────────────────────────────────
 TOTAL_CASH = 150000.0
+MAX_STOCKS = 4
 HOLDINGS = [
     {"code":"002223","name":"鱼跃医疗","shares":700,"cost":32.50,
      "tags":["医药","医疗器械","养老","医保","健康","中药","集采"],
@@ -34,14 +35,7 @@ SMTP_PORT = 465
 # ─────────────────────────────────────────────────────────
 
 def fetch_quotes():
-    """
-    获取A股+港股主要指数实时行情
-    A股指数: 东方财富 push2.eastmoney.com API (字段: f2=现价 f3=涨跌幅% f4=涨跌额 f18=昨收 f15=最高 f16=最低)
-    港股指数: 新浪 hq.sinajs.cn API (parts[3]=昨收 parts[5]=现价 parts[7]=涨跌额 parts[8]=涨跌幅%)
-    """
     result = {}
-
-    # ── A股: 东方财富 ─────────────────────────
     try:
         r = requests.get(
             "https://push2.eastmoney.com/api/qt/ulist.np/get"
@@ -49,8 +43,7 @@ def fetch_quotes():
             "&fields=f2,f3,f4,f15,f16,f18,f12,f14"
             "&secids=1.000001,0.399001,0.399006"
             "&ut=fa5fd1943c7b386f172d6893dbfba10b",
-            headers={"Referer":"https://quote.eastmoney.com",
-                     "User-Agent":"Mozilla/5.0"},
+            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
             timeout=10)
         d = r.json()
         key_map = {"000001":"sh000001","399001":"sz399001","399006":"sz399006"}
@@ -69,8 +62,6 @@ def fetch_quotes():
             }
     except Exception as e:
         print(f"东方财富行情获取失败: {e}")
-
-    # ── 港股: 新浪 ─────────────────────────────
     try:
         r = requests.get(
             "http://hq.sinajs.cn/list=hkHSI,hkHSTECH",
@@ -82,24 +73,19 @@ def fetch_quotes():
             val = line.split('"')[1] if '"' in line else ""
             parts = val.split(",")
             if len(parts) < 9: continue
-            close = float(parts[5]) if parts[5] else 0
+            close = float(parts[5]) if parts[5] else 0.0
             prev_close = float(parts[3]) if parts[3] else close
             pct = float(parts[8]) if parts[8] else 0.0
             change = float(parts[7]) if parts[7] else 0.0
             result[key] = {
-                "name": parts[1],
-                "close": close,
-                "pct": pct,
-                "change": change,
-                "prev_close": prev_close,
+                "name": parts[1], "close": close, "pct": pct,
+                "change": change, "prev_close": prev_close,
             }
     except Exception as e:
         print(f"港股行情获取失败: {e}")
-
     return result
 
 def fetch_us_quotes():
-    """获取昨夜美股数据（纳指/道指/标普500）via Yahoo Finance"""
     tickers = {"^IXIC":"纳斯达克","^DJI":"道琼斯","^GSPC":"标普500"}
     result = {}
     for sym, name in tickers.items():
@@ -141,6 +127,65 @@ def fetch_a50():
         pass
     return None
 
+def fetch_stock_ma(code):
+    """获取个股 MA5 / MA20 / MA60"""
+    try:
+        pre = "1" if code.startswith("6") else "0"
+        secid = f"{pre}.{code}"
+        r = requests.get(
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
+            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+            f"&klt=101&fqt=1&lmt=70",
+            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        d = r.json()
+        klines = d.get("data",{}).get("klines",[])
+        if len(klines) < 20: return None
+        prices = [float(k.split(",")[2]) for k in klines]
+        ma5  = sum(prices[-5:])  / 5
+        ma20 = sum(prices[-20:]) / 20
+        ma60 = sum(prices[-60:]) / 60 if len(prices) >= 60 else None
+        cur  = prices[-1]
+        vol_list = [float(k.split(",")[6]) for k in klines[-20:]]
+        avg_vol = sum(vol_list) / len(vol_list)
+        vol_ratio = vol_list[-1] / avg_vol if avg_vol > 0 else 1.0
+        return {"ma5":ma5,"ma20":ma20,"ma60":ma60,"cur":cur,"vol_ratio":vol_ratio}
+    except Exception as e:
+        print(f"  {code} MA获取失败: {e}")
+        return None
+
+def fetch_stock_info_em(code):
+    """获取个股基本面 via 东方财富"""
+    try:
+        pre = "1" if code.startswith("6") else "0"
+        secid = f"{pre}.{code}"
+        r = requests.get(
+            "https://push2.eastmoney.com/api/qt/stock/get"
+            f"?secid={secid}"
+            "&fields=f58,f47,f48,f162,f167,f116,f117",
+            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        d = r.json()
+        data = d.get("data",{}) or {}
+        name = data.get("f58","") or ""
+        mkt_cap = (data.get("f47",0) or 0)
+        pe_ttm  = data.get("f162",0) or 0
+        pb      = data.get("f167",0) or 0
+        profit_growth = data.get("f116",0) or 0
+        revenue_growth = data.get("f117",0) or 0
+        return {
+            "name": name,
+            "mkt_cap_yi": round(mkt_cap / 10000, 0) if mkt_cap else 0,
+            "pe_ttm": round(pe_ttm, 1) if pe_ttm and pe_ttm > 0 else None,
+            "pb": round(pb, 2) if pb and pb > 0 else None,
+            "profit_growth": round(profit_growth, 1) if profit_growth else None,
+            "revenue_growth": round(revenue_growth, 1) if revenue_growth else None,
+        }
+    except Exception as e:
+        print(f"  {code} 基本面获取失败: {e}")
+        return {}
+
 def fetch_news():
     news = []
     try:
@@ -168,10 +213,11 @@ def fetch_news():
 
 POS_KWS = ["上涨","反弹","突破","牛市","做多","加仓","增持","超配","买入","超预期",
            "业绩增长","政策支持","降息","降准","宽松","万亿","资金流入","外资","北向",
-           "净买入","开门红","涨停","大幅上涨","历史新高","超跌反弹","资金净流入"]
+           "净买入","开门红","涨停","大幅上涨","历史新高","超跌反弹","资金净流入",
+           "业绩超预期","订单饱满","产能扩张","市场份额提升","行业景气","景气回升","盈利预测上调"]
 NEG_KWS = ["下跌","暴跌","跳水","熊市","做空","减持","减仓","低配","卖出","不及预期",
            "业绩下滑","监管","收紧","加息","缩表","外资流出","踩雷","黑天鹅","暴雷",
-           "违约","美股大跌","跌停","历史新低","资金净流出"]
+           "违约","美股大跌","跌停","历史新低","资金净流出","业绩下修","商誉减值"]
 SEC_KWS = {
     "医疗":   ["医疗","医药","医保","集采","医疗器械","老龄化","养老","健康","中药","创新药","疫苗"],
     "银行":   ["银行","降息","降准","LPR","信贷","房地产","息差","不良率","净息差","宽信用"],
@@ -232,172 +278,127 @@ def calc_holding_values():
         mv = h["shares"] * price
         result.append({**h,"price":price,"market_value":mv})
     return result
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  个股操盘建议
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_stock_advice(hval, news_list, avg_pct, quotes):
-    """
-    给出单只持仓股的操作建议
-    """
-    code = hval["code"]
-    name = hval["name"]
+    name   = hval["name"]
     shares = hval["shares"]
-    cost = hval["cost"]
-    price = hval.get("price", 0)
-    mv = hval.get("market_value", 0)
-    tags = hval.get("tags", [])
-    watch = hval.get("watch", "")
+    cost   = hval["cost"]
+    price  = hval.get("price", 0)
+    tags   = hval.get("tags", [])
+    watch  = hval.get("watch", "")
 
     if not price:
         return {"name": name, "action": "⏳ 关注中", "color": "#888", "bg": "#f5f5f5",
-                "reason": "价格获取中，明日早报再分析", "signal": "neutral", "price": None}
+                "reason": "价格获取中，明日早报再分析", "signal": "neutral", "price": None,
+                "stop_loss": None, "add_zone": None, "urgent": False, "pnl": None}
 
-    pnl = (price - cost) / cost * 100   # 盈亏%
-    pnl_abs = (price - cost) * shares   # 盈亏金额
-    bull = avg_pct > 0.3
-    bear = avg_pct < -0.3
-
-    # 相关消息统计
-    tagged = [{**x, "sentiment": analyze_sentiment(x["text"])}
-              for x in news_list]
+    pnl = (price - cost) / cost * 100
+    pnl_abs = (price - cost) * shares
+    bull = avg_pct > 0.3; bear = avg_pct < -0.3
+    tagged = [{**x, "sentiment": analyze_sentiment(x["text"])} for x in news_list]
     rel = [x for x in tagged if any(t in x["text"] for t in tags)]
     pos_n = sum(1 for x in rel if x["sentiment"] == "positive")
     neg_n = sum(1 for x in rel if x["sentiment"] == "negative")
     sent_signal = "positive" if pos_n > neg_n else ("negative" if neg_n > pos_n else "neutral")
 
-    # 指数整体强弱
-    idx_pct = avg_pct
-
-    # ─── 操盘逻辑 ─────────────────────────
-    # 优先级: 止损 > 止盈 > 加仓 > 观望
-
-    # 硬止损线（亏损超过8%）
     if pnl <= -8.0:
-        return {
-            "name": name, "action": "🚨 建议止损", "color": "#e34a4a", "bg": "#fff5f5",
-            "reason": f"亏损{pnl:.1f}%，已破-8%止损线！保住本金最重要，控制亏损扩散",
-            "signal": "negative", "price": price, "pnl": pnl, "cost": cost,
-            "watch": watch,
-            "urgent": True,
-            "stop_loss": round(price * 0.97, 2),  # 再跌3%预警
-        }
+        return {"name": name, "action": "🚨 建议止损", "color": "#e34a4a", "bg": "#fff5f5",
+                "reason": f"亏损{pnl:.1f}%，已破-8%止损线！保住本金，控制亏损扩散。",
+                "signal": "negative", "price": price, "pnl": pnl, "cost": cost,
+                "watch": watch, "urgent": True, "stop_loss": round(price * 0.97, 2), "add_zone": None}
 
-    # 软止损（亏损5-8%）
     if pnl <= -5.0:
         action = "⚠️ 减仓观望" if (bear or sent_signal == "negative") else "🔔 设置止损"
-        reason = (f"亏损{pnl:.1f}%，接近止损区。"
-                  if pnl <= -5.0 else f"亏损{pnl:.1f}%，成本附近波动，"
-                  "注意破成本后的技术破位风险。")
-        if bear:
-            reason += " 大盘偏弱，双重压力，建议减仓控制仓位。"
-        else:
-            reason += " 建议设置价格提醒：跌破{:.2f}元（-8%）提醒止损。".format(cost * 0.92)
+        reason = f"亏损{pnl:.1f}%，接近止损区。"
+        if bear: reason += " 大盘偏弱，双重压力，建议减仓控制仓位。"
+        else: reason += f" 建议设置价格提醒：跌破{cost*0.92:.2f}元（-8%）提醒止损。"
         return {"name": name, "action": action, "color": "#e34a4a", "bg": "#fff5f5",
                 "reason": reason, "signal": "negative", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": round(cost * 0.92, 2),
-                "add_zone": round(price * 0.95, 2) if pnl > -8 else None}
+                "stop_loss": round(cost * 0.92, 2), "add_zone": round(price * 0.95, 2)}
 
-    # 止盈线（盈利超过15%）
     if pnl >= 15.0:
         reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），已超止盈线！"
-        if sent_signal == "positive":
-            reason += " 基本面+消息面均支撑，可分批止盈，先卖1/3锁利。"
-        elif sent_signal == "negative":
-            reason += " 但消息面出现利空，建议全部或大部分止盈，不要贪心。"
-        else:
-            reason += " 建议分批止盈：涨超20%全部走，跌破13%全部走。"
+        if sent_signal == "positive": reason += " 基本面+消息面均支撑，可分批止盈，先卖1/3锁利。"
+        elif sent_signal == "negative": reason += " 但消息面出现利空，建议全部或大部分止盈。"
+        else: reason += " 建议分批止盈：涨超20%全部走，跌破13%全部走。"
         return {"name": name, "action": "🎯 止盈参考", "color": "#e34a4a", "bg": "#fff5f5",
                 "reason": reason, "signal": "positive", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": round(price * 0.88, 2),
-                "add_zone": None}
+                "stop_loss": round(price * 0.88, 2), "add_zone": None}
 
-    # 盈利8-15%（强势区）
     if pnl >= 8.0:
-        reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在安全垫内。 "
-        if sent_signal == "positive":
-            reason += " 基本面+消息面偏多，坚定持有，可适度加仓。"
-        elif sent_signal == "negative":
-            reason += " 但消息面有隐忧，可适当减仓锁定部分利润。"
-        else:
-            reason += " 强势运行，持有待涨，同时上移止损到成本价（{:.2f}元）。".format(cost)
+        reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在安全垫内。"
+        if sent_signal == "positive": reason += " 基本面+消息面偏多，坚定持有，可适度加仓。"
+        elif sent_signal == "negative": reason += " 但消息面有隐忧，可适当减仓锁定部分利润。"
+        else: reason += f" 强势运行，持有待涨，同时上移止损到成本价{cost:.2f}元。"
         return {"name": name, "action": "✅ 持有为主", "color": "#27ae60", "bg": "#f0fff4",
                 "reason": reason, "signal": "positive", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": cost,  # 保本止损
-                "add_zone": round(price * 1.03, 2)}
+                "stop_loss": cost, "add_zone": round(price * 1.03, 2)}
 
-    # 盈利0-8%（正常持有）
     if pnl >= 0:
-        reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在成本上方，安心持有。 "
-        if sent_signal == "positive":
-            reason += " 消息面偏多，有望继续上攻。"
-        elif sent_signal == "negative":
-            reason += " 消息面偏空，注意回落风险，止损设在成本价{:.2f}元。".format(cost)
-        else:
-            reason += " 无明显方向，继续持股为主，止损{:.2f}元（成本价）。".format(cost)
+        reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在成本上方，安心持有。"
+        if sent_signal == "positive": reason += " 消息面偏多，有望继续上攻。"
+        elif sent_signal == "negative": reason += f" 消息面偏空，注意回落风险，止损设在成本价{cost:.2f}元。"
+        else: reason += f" 无明显方向，继续持股，止损{cost:.2f}元。"
         return {"name": name, "action": "✅ 安心持有", "color": "#27ae60", "bg": "#f0fff4",
                 "reason": reason, "signal": sent_signal, "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
                 "stop_loss": cost,
                 "add_zone": None if sent_signal == "negative" else round(price * 0.98, 2)}
 
-    # 亏损0-5%（浅套）
-    # pnl < 0 but > -5%
-    reason = f"浮亏{pnl:.1f}%（{pnl_abs:,.0f}元），仍在安全区间。 "
-    if watch:
-        reason += "关注方向：" + watch + "。"
-    if sent_signal == "positive":
-        reason += " 基本面支撑+消息面偏多，可考虑逢低小幅加仓拉低成本。"
-    elif sent_signal == "negative":
-        reason += " 消息面偏空，若继续跌破成本{:.2f}元注意止损。".format(cost)
-    else:
-        reason += " 无明显催化，耐心等待，不追加投入。"
+    reason = f"浮亏{pnl:.1f}%（{pnl_abs:,.0f}元），仍在安全区间。"
+    if watch: reason += " 关注方向：" + watch + "。"
+    if sent_signal == "positive": reason += " 基本面支撑+消息面偏多，可考虑逢低小幅加仓拉低成本。"
+    elif sent_signal == "negative": reason += f" 消息面偏空，若跌破成本{cost:.2f}元注意止损。"
+    else: reason += " 无明显催化，耐心等待，不追加投入。"
     stop_color = "#e34a4a" if pnl < -3 else "#f39c12"
     return {"name": name, "action": "🔔 耐心持有", "color": stop_color, "bg": "#fff8e1",
             "reason": reason, "signal": sent_signal, "price": price, "pnl": pnl,
-            "cost": cost, "watch": watch, "urgent": False,
-            "stop_loss": cost,   # 成本止损
+            "cost": cost, "watch": watch, "urgent": False, "stop_loss": cost,
             "add_zone": round(price * 0.97, 2) if sent_signal == "positive" else None}
 
 def html_stock_advice(hvals, news_list, avg_pct, quotes):
-    """生成个股操盘建议 HTML"""
     out = ""
     for hval in hvals:
         adv = get_stock_advice(hval, news_list, avg_pct, quotes)
-        price_str = ("{:.2f}元".format(adv["price"]) if adv["price"] else "获取中")
-        pnl_str = ("{:+.1f}%".format(adv["pnl"]) if adv["pnl"] is not None else "")
-        pnl_abs = (adv["pnl"] / 100 * hval["cost"] * hval["shares"]) if adv["pnl"] is not None else 0
-        pnl_abs_str = ("({:+.0f}元)".format(pnl_abs) if pnl_abs else "")
+        price_str = (f"{adv['price']:.2f}元" if adv["price"] else "获取中")
+        pnl_str   = (f"{adv['pnl']:+.1f}%"  if adv["pnl"] is not None else "")
+        pnl_abs   = (adv["pnl"] / 100 * hval["cost"] * hval["shares"]) if adv["pnl"] is not None else 0
+        pnl_abs_str = (f"({pnl_abs:+.0f}元)" if pnl_abs else "")
         urgent_tag = " <span style='background:#e34a4a;color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;font-weight:700'>急</span>" if adv.get("urgent") else ""
-        stop_str = ("止损参考：{:.2f}元".format(adv["stop_loss"]) if adv.get("stop_loss") else "")
-        add_str = ("加仓参考：{:.2f}元".format(adv["add_zone"]) if adv.get("add_zone") else "")
-        tags_str = "关注：" + hval.get("watch","无") if hval.get("watch") else ""
-        out += ("<div style='border:1px solid #eee;border-radius:12px;padding:12px;margin-bottom:10px;background:#fafbff'>"
-                "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>"
-                "<div style='font-size:15px;font-weight:700;color:#1a1a2e'>" + adv["name"] + "</div>"
-                "<div style='font-size:11px;color:#aaa'>" + str(hval["shares"]) + "股</div>"
-                "<div style='margin-left:auto;text-align:right'>"
-                "<div style='font-size:14px;font-weight:700;color:" + adv["color"] + "'>" + adv["action"] + urgent_tag + "</div>"
-                "<div style='font-size:11px;color:#888'>" + price_str + " <b style='color:" + adv["color"] + "'>" + pnl_str + "</b> " + pnl_abs_str + "</div>"
-                "</div></div>"
-                "<div style='font-size:12px;color:#444;line-height:1.6;margin-bottom:6px'>" + adv["reason"] + "</div>")
+        stop_str  = (f"止损参考：{adv['stop_loss']:.2f}元" if adv.get("stop_loss") else "")
+        add_str   = (f"加仓参考：{adv['add_zone']:.2f}元"  if adv.get("add_zone")  else "")
+        tags_str  = ("关注：" + hval.get("watch","无") if hval.get("watch") else "")
+        out += (
+            f"<div style='border:1px solid #eee;border-radius:12px;padding:12px;margin-bottom:10px;background:#fafbff'>"
+            f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px'>"
+            f"<div style='font-size:15px;font-weight:700;color:#1a1a2e'>{adv['name']}</div>"
+            f"<div style='font-size:11px;color:#aaa'>{hval['shares']}股</div>"
+            f"<div style='margin-left:auto;text-align:right'>"
+            f"<div style='font-size:14px;font-weight:700;color:{adv['color']}'>{adv['action']}{urgent_tag}</div>"
+            f"<div style='font-size:11px;color:#888'>{price_str} <b style='color:{adv['color']}'>{pnl_str}</b> {pnl_abs_str}</div>"
+            f"</div></div>"
+            f"<div style='font-size:12px;color:#444;line-height:1.6;margin-bottom:6px'>{adv['reason']}</div>")
         if stop_str or add_str:
             tags_line = "  |  ".join(x for x in [stop_str, add_str] if x)
-            out += "<div style='font-size:10px;color:#4a90d9;margin-bottom:4px'>" + tags_line + "</div>"
+            out += f"<div style='font-size:10px;color:#4a90d9;margin-bottom:4px'>{tags_line}</div>"
         if tags_str and tags_str != "关注：无":
-            out += "<div style='font-size:10px;color:#888'>" + tags_str + "</div>"
+            out += f"<div style='font-size:10px;color:#888'>{tags_str}</div>"
         out += "</div>"
     return out
-
 
 def get_position_advice(avg, total_mv):
     ratio = total_mv/TOTAL_CASH*100
     advices = []
     if avg > 1.0:
         advices.append({"icon":"📉","action":"⚠️ 减仓提示","color":"#e34a4a","bg":"#fff5f5",
-            "text":f"大盘涨幅超1%，今日强势明显，建议适度减仓锁利，将仓位降至50%以下，落袋为安。个人持仓{ratio:.0f}%，注意高开后回落风险。"})
+            "text":f"大盘涨幅超1%，今日强势明显，建议适度减仓锁利，将仓位降至50%以下。个人持仓{ratio:.0f}%，注意高开后回落风险。"})
     elif avg < -1.0:
         if ratio > 60:
             advices.append({"icon":"🛡️","action":"🛡️ 控仓提示","color":"#3a9e4f","bg":"#f0fff4",
@@ -417,43 +418,366 @@ def get_position_advice(avg, total_mv):
                 "text":f"当前仓位{ratio:.0f}%合理，大盘无明显趋势，继续持股待涨，保持现有配置不变。"})
     return advices
 
-def get_recommended_sectors(avg, mode, news_list):
-    bull = avg > 0.3; bear = avg < -0.3
-    sec_cnt = {}
-    for item in news_list:
-        for s in match_sectors(item["text"]):
-            sec_cnt[s] = sec_cnt.get(s,0)+1
-    hot_secs = [s for s,_ in sorted(sec_cnt.items(),key=lambda x:-x[1])[:2]]
-    hot_str = "、".join(hot_secs) if hot_secs else ""
-    if bull:
-        return [
-            {"tag":"第1梯队 🥇","sector":"大金融（银行/券商）","stocks":"银行+券商",
-             "desc":"低估值+政策宽松预期，成交量回暖直接利好券商，低估值银行估值修复。重点关注：宁波银行、国信证券。"},
-            {"tag":"第2梯队 🥈","sector":"科技成长（AI/半导体）","stocks":"AI+半导体+算力",
-             "desc":"风险偏好提升，资金追逐弹性板块，关注国产替代主线。" + (f" 近期{hot_str}消息催化。" if hot_str else "")},
-            {"tag":"第3梯队 🥉","sector":"新能源","stocks":"锂电+光伏+储能",
-             "desc":"政策加码+超跌反弹概率，固态电池产业化加速，关注龙头超跌机会。"},
-        ]
-    elif bear:
-        return [
-            {"tag":"第1梯队 🥇","sector":"医药医疗","stocks":"中药+医疗器械+创新药",
-             "desc":"防御性强+老龄化长期逻辑，政策支持创新药。" + (f" 近期{hot_str}消息利好。" if hot_str else "")},
-            {"tag":"第2梯队 🥈","sector":"大金融（银行/高股息）","stocks":"银行+高股息防御",
-             "desc":"低估值抗跌，高股息防御，险资配置偏好，适合当前防御阶段。"},
-            {"tag":"第3梯队 🥉","sector":"消费","stocks":"白酒+家电+汽车",
-             "desc":"扩内需政策预期，内需托底逻辑，下跌空间有限，适合长线布局。"},
-        ]
-    else:
-        personal = "个人持仓鱼跃医疗(医疗)、宁波银行(银行)、国信证券(券商)均属大金融+医疗方向。"
-        return [
-            {"tag":"第1梯队 🥇","sector":"大金融（券商/银行）","stocks":"券商+银行",
-             "desc":"低估值修复预期，成交量若能持续万亿以上，券商弹性大。" + personal},
-            {"tag":"第2梯队 🥈","sector":"医药","stocks":"中药+医疗器械",
-             "desc":"业绩稳健，防御配置，集采边际影响减弱，适合当前震荡市。个人持仓鱼跃医疗属于医疗板块。"},
-            {"tag":"第3梯队 🥉","sector":"科技","stocks":"AI应用+半导体",
-             "desc":"等待政策明朗，关注一季报超预期个股。" + (f" 近期{hot_str}消息面关注。" if hot_str else " 消息面暂无明确催化，谨慎参与。")},
-        ]
+def adj_rows(advices):
+    out = ""
+    for adv in advices:
+        out += ("<div class='adj'>"
+                "<div class='adji'>" + adv["icon"] + "</div>"
+                "<div class='adjb'>"
+                "<div class='adjn' style='color:" + adv["color"] + "'>" + adv["action"] + "</div>"
+                "<div class='adjt'>" + adv["text"] + "</div></div></div>")
+    return out
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  个股推荐引擎（稳健型）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 稳健选股池：各行业龙头 / 细分冠军
+STOCK_POOL = [
+    ("002007","华兰生物","血制品/疫苗",
+     "血制品赛道壁垒高、浆站资源稀缺，供给偏紧推动价格上行；四价流感疫苗为独家大单品；当前估值处历史低位，PEG<1，安全边际充足。",
+     35, 5.0),
+    ("000538","云南白药","中药/日化",
+     "品牌护城河极深，牙膏市占率稳定第一，医美+中药新业务打开成长空间；国企改革提升运营效率；低估值高股息，适合长期持有。",
+     30, 4.0),
+    ("600196","复星医药","创新药/医疗器械",
+     "创新药进入密集收获期，多款生物类似药+CAR-T上市在即；医疗器械稳健增长；国际化布局领先，估值具备性价比。",
+     40, 4.5),
+    ("600036","招商银行","零售银行",
+     "零售银行标杆，资产质量优异，息差韧性强；财富管理业务持续高增长；当前PB处历史低位，性价比突出，适合稳健配置。",
+     12, 1.5),
+    ("601166","兴业银行","商业银行",
+     "「商行+投行」战略成效显著，中间业务收入增速领先；资产质量持续改善；低估值+高股息，适合稳健底仓。",
+     10, 1.2),
+    ("600030","中信证券","综合券商",
+     "券商龙头，IPO项目储备全行业第一；资本市场改革直接受益；当前PB处历史底部，弹性大+防御强，适合震荡市配置。",
+     25, 1.8),
+    ("000776","广发证券","券商",
+     "财富管理转型领先，公募基金保有量行业前三；自营业务稳健；当前估值低估明显，安全边际高。",
+     22, 1.5),
+    ("600519","贵州茅台","高端白酒",
+     "高端白酒绝对龙头，定价权无可撼动；茅台酒供需紧平衡，出厂价具备上调空间；业绩确定性强，高股息，A股最稳健核心资产之一。",
+     40, 12.0),
+    ("000858","五粮液","高端白酒",
+     "浓香型白酒龙头，品牌力仅次于茅台；动销边际改善，渠道库存健康；估值处历史中枢，性价比较高。",
+     25, 6.0),
+    ("601012","隆基绿能","光伏龙头",
+     "光伏组件龙头，BC电池技术行业领先，成本优势显著；海外产能布局完善，规避贸易壁垒；当前股价处历史低位，周期底部布局价值凸显。",
+     30, 3.5),
+    ("603259","药明康德","CXO龙头",
+     "全球CXO龙头，临床前CRO+CDMO双轮驱动；新签订单持续高增长，业绩确定性强；估值回调至历史低位，配置价值凸显。",
+     35, 5.5),
+    ("600900","长江电力","水电/高股息",
+     "长江干流稀缺水电资产，现金流充沛、业绩稳定；乌白电站注入后装机翻倍；承诺高分红（>=70%），A股最典型的高股息稳健标的。",
+     30, 3.0),
+    ("002461","珠江啤酒","啤酒",
+     "华南啤酒龙头，餐饮渠道复苏带动销量增长；产品结构升级，高端产品占比提升；当前PE处历史低位，弹性较大。",
+     25, 3.0),
+    ("601888","中国中免","免税零售",
+     "免税行业绝对龙头，政策支持消费回流；海南自贸港政策持续加码，客流边际改善；当前估值处历史低位，反弹弹性大。",
+     35, 6.0),
+]
+
+def recommend_stocks(news_list, avg_pct):
+    """
+    稳健型个股推荐：
+    1. 排除已有持仓
+    2. 基本面筛选：PE/PB满足阈值
+    3. 技术面筛选：MA5 > MA20（多头排列），价格在MA20上方
+    4. 消息面：近期无重大利空
+    5. 大盘过滤：熊市环境下降低进攻型标的
+    """
+    HOLDING_CODES = {h["code"] for h in HOLDINGS}
+
+    bull = avg_pct > 0.3
+    bear = avg_pct < -0.3
+
+    tagged = [{**x,"sentiment":analyze_sentiment(x["text"]),"sectors":match_sectors(x["text"])}
+              for x in news_list]
+    neg_text = " ".join(x["text"] for x in tagged if x["sentiment"]=="negative")
+    pos_text = " ".join(x["text"] for x in tagged if x["sentiment"]=="positive")
+
+    candidates = []
+
+    for code, name, sector, reason, pe_max, pb_max in STOCK_POOL:
+        if code in HOLDING_CODES:
+            continue
+
+        # ── 1. 基本面筛选 ───────────────────
+        info = fetch_stock_info_em(code)
+        name = info.get("name", name) or name
+        pe = info.get("pe_ttm")
+        pb = info.get("pb")
+        mkt_cap = info.get("mkt_cap_yi", 0)
+
+        if pe is not None and pe > pe_max:
+            continue
+        if pb is not None and pb > pb_max:
+            continue
+        if mkt_cap > 0 and mkt_cap < 50:
+            continue
+
+        # ── 2. 技术面筛选 ───────────────────
+        ma_data = fetch_stock_ma(code)
+        if ma_data is None:
+            continue
+        ma5  = ma_data["ma5"]
+        ma20 = ma_data["ma20"]
+        ma60 = ma_data["ma60"]
+        cur  = ma_data["cur"]
+        vol_ratio = ma_data["vol_ratio"]
+
+        # 多头排列：MA5 > MA20，且价格在MA20上方
+        if not (ma5 > ma20 and cur > ma20 * 0.97):
+            continue
+        # MA60辅助：价格在MA60上方更强
+        above_ma60 = cur > ma60 if ma60 else True
+        # 量比合理（不要异常放量）
+        if vol_ratio > 5.0:
+            continue
+
+        # ── 3. 消息面利空排除 ───────────────
+        # 特定个股被点名利空
+        stock_neg_kws = {"002007":["召回","造假","停产"],
+                         "000538":["召回","调查","违规"],
+                         "600196":["黑天鹅","调查","暴雷"],
+                         "600036":["不良率飙升","大幅裁员"],
+                         "600030":["监管处罚","造假"],
+                         "600519":["塑化剂","假酒"],
+                         "000858":["假酒","质量门"],
+                         "601012":["双反","补贴取消"],
+                         "603259":["实体清单","制裁"],
+                         "600900":["来水偏枯","地质灾害"],
+                        }
+        neg_kws = stock_neg_kws.get(code, [])
+        if any(kw in neg_text for kw in neg_kws):
+            continue
+
+        # ── 4. 风险收益评分 ─────────────────
+        score = 0.0
+        # 技术面加分
+        if above_ma60: score += 2  # 在MA60上方
+        if ma5 > ma20 * 1.02: score += 1  # MA5明显高于MA20
+        if 0.8 <= vol_ratio <= 2.0: score += 1  # 量比健康
+        # 基本面加分
+        if pe is not None and pe < pe_max * 0.7: score += 2  # 明显低估
+        if info.get("profit_growth") and info["profit_growth"] > 10: score += 1
+        if info.get("revenue_growth") and info["revenue_growth"] > 10: score += 1
+        # 消息面加分
+        sector_kws = {"银行":["银行","净息差","降息","降准"],
+                      "券商":["券商","注册制","IPO","成交量"],
+                      "医药":["医药","集采","创新药","医疗器械"],
+                      "消费":["白酒","消费","扩内需"],
+                      "新能源":["光伏","储能","新能源","碳中和"]}
+        skws = next((v for k,v in sector_kws.items() if k in sector), [])
+        if any(kw in pos_text for kw in skws):
+            score += 2
+        if any(kw in neg_text for kw in skws):
+            score -= 1
+
+        price = cur
+        gap_pct = (ma20 - cur) / ma20 * 100 if ma20 else 0
+        if gap_pct > 0 and gap_pct < 3:
+            score += 1  # 贴近MA20，有一定安全边际
+
+        candidates.append({
+            "code": code, "name": name, "sector": sector,
+            "reason": reason, "score": score,
+            "price": round(price, 2), "pe": pe, "pb": pb,
+            "ma5": round(ma5, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2) if ma60 else None,
+            "vol_ratio": round(vol_ratio, 2),
+            "above_ma60": above_ma60,
+        })
+
+    # 按评分排序，取前3名
+    candidates.sort(key=lambda x: -x["score"])
+    return candidates[:3]
+
+def build_order_strategy(code, name, sector, price, ma20, avg_pct):
+    """
+    根据股价与MA20的距离，生成稳健型条件单策略
+    """
+    bull = avg_pct > 0.3
+    bear = avg_pct < -0.3
+
+    # 计算建议买入价（贴近MA20，分批建仓）
+    entry1 = round(ma20 * 1.00, 2)   # 贴近MA20建仓
+    entry2 = round(ma20 * 0.97, 2)   # 回调3%再加仓
+    entry3 = round(ma20 * 0.93, 2)   # 回调7%最后一批
+
+    # 止损位（硬止损：亏损8%）
+    stop_loss = round(price * 0.92, 2)
+
+    # 止盈位（分批止盈）
+    profit_take1 = round(entry1 * 1.10, 2)   # 涨10%先卖1/3
+    profit_take2 = round(entry1 * 1.15, 2)   # 涨15%再卖1/3
+    profit_take3 = round(entry1 * 1.20, 2)   # 涨20%全部清仓
+
+    # 移动止损
+    trail_stop = round(price * 0.96, 2)  # 从浮盈最高点跌6%止盈
+
+    strategy = {
+        "entry1": entry1, "entry2": entry2, "entry3": entry3,
+        "stop_loss": stop_loss,
+        "profit_take1": profit_take1, "profit_take2": profit_take2, "profit_take3": profit_take3,
+        "trail_stop": trail_stop,
+        "risk_pct": round((price - stop_loss) / price * 100, 1),
+        "max_profit_pct": round((profit_take3 - entry1) / entry1 * 100, 1),
+    }
+    return strategy
+
+def html_recommendation_section(recs, hvals, avg_pct, news_list):
+    """
+    生成「今日推荐个股」HTML段落
+    - 有推荐：逐个展示个股详情（含理由+条件单）
+    - 无推荐：明确告知原因
+    """
+    holding_codes = {h["code"] for h in HOLDINGS}
+    holding_names  = {h["code"]: h["name"] for h in HOLDINGS}
+    n_holdings = len(HOLDINGS)
+    vacancy = MAX_STOCKS - n_holdings
+    vacancy_str = f"（当前持仓{n_holdings}只，最多可持仓{MAX_STOCKS}只，空位{vacancy}个）"
+
+    if not recs:
+        return (
+            "<div style=\'background:#f8f9fc;border-radius:12px;padding:16px;text-align:center\'>"
+            "<div style=\'font-size:20px;margin-bottom:8px\'>🔍</div>"
+            "<div style=\'font-size:14px;font-weight:700;color:#555;margin-bottom:6px\'>今日暂无推荐个股</div>"
+            "<div style=\'font-size:12px;color:#888;line-height:1.6\'>"
+            "当前市场环境不符合稳健建仓条件，建议耐心等待。<br>"
+            "可能原因：大盘趋势不明、优质标的估值偏高、技术面尚未形成多头排列。<br>"
+            "保持现有持仓，继续执行现有条件单策略。{vacancy_str}"
+            "</div></div>".format(vacancy_str=vacancy_str)
+        )
+
+    # 如果有空位，提示可以替换哪只
+    replace_tip = ""
+    if vacancy == 0:
+        # 满仓，提示替换建议
+        weak_holdings = [h for h in hvals if (h.get("price",0)-h["cost"])/h["cost"]*100 < -5 or
+                          (h.get("price",0)-h["cost"])/h["cost"]*100 > 20]
+        if weak_holdings:
+            weakest = weak_holdings[0]
+            pnl = (weakest.get("price",0)-weakest["cost"])/weakest["cost"]*100
+            replace_tip = (
+                f"<div style=\'background:#fff8e1;border-radius:10px;padding:10px;margin-bottom:10px\'>"
+                f"<div style=\'font-size:11px;font-weight:700;color:#e07b00;margin-bottom:4px\'>⚠️ 满仓提示（已持有{MAX_STOCKS}只）</div>"
+                f"<div style=\'font-size:12px;color:#666\'>"
+                f"当前已满{MAX_STOCKS}只持仓，如考虑换仓，建议关注："
+                f"<b>{weakest['name']}</b>（{weakest['code']}，盈亏{pnl:+.1f}%）<br>"
+                f"理由：盈亏比已超出目标范围，可考虑分批止盈/止损后换入。"
+                "</div></div>"
+            )
+        else:
+            replace_tip = (
+                f"<div style=\'background:#f0fff4;border-radius:10px;padding:10px;margin-bottom:10px\'>"
+                f"<div style=\'font-size:11px;font-weight:700;color:#27ae60;margin-bottom:4px\'>✅ 满仓提示（已持有{MAX_STOCKS}只）</div>"
+                f"<div style=\'font-size:12px;color:#666\'>"
+                f"当前已满{MAX_STOCKS}只持仓，暂无替换建议。现有持仓均在正常盈亏区间内，继续执行条件单策略。"
+                "</div></div>"
+            )
+
+    # 头部提示
+    vacancy_note = ""
+    if vacancy > 0:
+        vacancy_note = (
+            f"<div style=\'background:#eef6ff;border-radius:10px;padding:10px;margin-bottom:12px\'>"
+            f"<div style=\'font-size:12px;color:#4a90d9\'>"
+            f"📋 当前持仓{n_holdings}只，最多可持仓{MAX_STOCKS}只，有 <b>{vacancy}个</b> 空位可建仓"
+            "</div></div>"
+        )
+
+    out = vacancy_note
+    if replace_tip:
+        out += replace_tip
+
+    for i, rec in enumerate(recs):
+        code = rec["code"]
+        name = rec["name"]
+        sector = rec["sector"]
+        reason = rec["reason"]
+        price = rec["price"]
+        ma20 = rec["ma20"]
+        score = rec["score"]
+        pe = rec.get("pe")
+        pb = rec.get("pb")
+
+        strat = build_order_strategy(code, name, sector, price, ma20, avg_pct)
+
+        # 星级评分显示
+        stars = "★" * min(int(score), 5) + "☆" * max(0, 5 - int(score))
+
+        # 风险标签
+        risk_tag = ""
+        if strat["risk_pct"] <= 6:
+            risk_tag = "<span style=\'background:#e8f5ee;color:#27ae60;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700\'>低风险</span>"
+        elif strat["risk_pct"] <= 8:
+            risk_tag = "<span style=\'background:#fff8e1;color:#e07b00;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700\'>中风险</span>"
+        else:
+            risk_tag = "<span style=\'background:#fff5f5;color:#e34a4a;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700\'>高风险</span>"
+
+        # 基本面信息
+        fin_info = ""
+        if pe or pb:
+            fin_parts = []
+            if pe: fin_parts.append(f"PE {pe}")
+            if pb: fin_parts.append(f"PB {pb}")
+            fin_info = "<span style=\'font-size:11px;color:#888\'> | " + " ".join(fin_parts) + "</span>"
+
+        out += (
+            f"<div style=\'border:1px solid #e0e8f5;border-radius:12px;padding:14px;margin-bottom:14px;background:#fafbff\'>"
+            # 标题行
+            f"<div style=\'display:flex;align-items:center;gap:8px;margin-bottom:10px\'>"
+            f"<div style=\'background:#4a90d9;color:#fff;font-size:11px;font-weight:700;padding:2px 10px;border-radius:10px\'>推荐{i+1}</div>"
+            f"<div style=\'font-size:16px;font-weight:700;color:#1a1a2e\'>{name} <span style=\'font-size:11px;color:#aaa;font-weight:400\'>{code}</span></div>"
+            f"<div style=\'margin-left:auto;display:flex;gap:6px;align-items:center\'>{risk_tag}</div>"
+            f"</div>"
+            # 基本面行
+            f"<div style=\'font-size:12px;color:#555;margin-bottom:8px\'>"
+            f"<span style=\'background:#f0f4ff;color:#4a90d9;font-size:11px;padding:1px 6px;border-radius:6px;font-weight:600\'>{sector}</span>"
+            f"<span style=\'margin-left:6px\'>现价 <b>{price:.2f}元</b></span>"
+            f"{fin_info}"
+            f"</div>"
+            # 推荐理由
+            f"<div style=\'background:#fff;border-radius:10px;padding:10px;margin-bottom:10px\'>"
+            f"<div style=\'font-size:10px;font-weight:700;color:#4a90d9;margin-bottom:4px\'>📌 推荐理由</div>"
+            f"<div style=\'font-size:12px;color:#444;line-height:1.7\'>{reason}</div>"
+            f"</div>"
+            # 条件单策略
+            f"<div style=\'background:#f8f9fc;border-radius:10px;padding:10px\'>"
+            f"<div style=\'font-size:10px;font-weight:700;color:#888;margin-bottom:8px\'>📋 稳健型条件单策略（参考）</div>"
+            f"<div style=\'display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px\'>"
+            # 建仓策略
+            f"<div style=\'background:#fff;border-radius:8px;padding:8px\'>"
+            f"<div style=\'color:#27ae60;font-weight:700;margin-bottom:4px\'>🟢 分批建仓</div>"
+            f"<div style=\'color:#444\'>首笔：<b>{strat['entry1']:.2f}元</b>（贴近MA20）<br>"
+            f"二笔：{strat['entry2']:.2f}元（回调-3%）<br>"
+            f"末笔：{strat['entry3']:.2f}元（极限回调-7%）</div>"
+            f"</div>"
+            # 止损策略
+            f"<div style=\'background:#fff;border-radius:8px;padding:8px\'>"
+            f"<div style=\'color:#e34a4a;font-weight:700;margin-bottom:4px\'>🔴 止损策略</div>"
+            f"<div style=\'color:#444\'>硬止损：<b>{strat['stop_loss']:.2f}元</b><br>"
+            f"（买入价-{strat['risk_pct']:.1f}%）<br>"
+            f"移动止损：跌破最高点-6%触发</div>"
+            f"</div>"
+            # 止盈策略
+            f"<div style=\'background:#fff;border-radius:8px;padding:8px;grid-column:1/-1\'>"
+            f"<div style=\'color:#4a90d9;font-weight:700;margin-bottom:4px\'>🔵 分批止盈</div>"
+            f"<div style=\'color:#444;line-height:1.8\'>"
+            f"① 涨10% → <b>{strat['profit_take1']:.2f}元</b> → 卖1/3 锁利（{strat['max_profit_pct']:.0f}%空间→首笔可+{strat['profit_take1']:.0f}元）<br>"
+            f"② 涨15% → <b>{strat['profit_take2']:.2f}元</b> → 再卖1/3<br>"
+            f"③ 涨20% → <b>{strat['profit_take3']:.2f}元</b> → 全部清仓，落袋为安"
+            f"</div></div>"
+            f"</div></div>"
+        )
+
+    return out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  HTML 报告构建
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CSS = """<style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f0f2f7;color:#1a1a2e;padding:0}
@@ -484,15 +808,6 @@ td{padding:9px 6px;border-bottom:1px solid #f5f5f5;vertical-align:middle}
 .nbody{flex:1}
 .ntext{font-size:13px;line-height:1.5;color:#222}
 .nmeta{font-size:10px;color:#aaa;margin-top:3px}
-.sec{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #f5f5f5}
-.sec:last-child{border-bottom:none}
-.secname{font-size:12px;font-weight:700;color:#222;min-width:68px;flex-shrink:0}
-.secimp{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;min-width:44px;text-align:center;flex-shrink:0}
-.secdesc{font-size:11px;color:#666;flex:1;line-height:1.4}
-.rcard{border:1px solid #eee;border-radius:12px;padding:12px;margin-bottom:10px;background:#fafbff}
-.rtag{font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;display:inline-block;margin-bottom:6px}
-.rname{font-size:14px;font-weight:700;color:#222;margin-bottom:4px}
-.rdesc{font-size:12px;color:#555;line-height:1.5}
 .adj{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid #f5f5f5}
 .adj:last-child{border-bottom:none}
 .adji{font-size:18px;flex-shrink:0;width:24px;text-align:center;padding-top:1px}
@@ -509,42 +824,42 @@ th,td{padding:7px 4px;font-size:11px}
 
 def html_head(title):
     return ("<!DOCTYPE html><html><head>"
-            "<meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<meta charset=\'utf-8\'>"
+            "<meta name=\'viewport\' content=\'width=device-width,initial-scale=1\'>"
             "<title>" + title + "</title>" + CSS + "</head><body>"
-            "<div class='wrap'>")
+            "<div class=\'wrap\'>")
 
 def title_div():
     n, ds = now_str()
     return "<h1>" + ds + "</h1>"
 
 def card(lbl, body):
-    return "<div class='card'><span class='lbl'>" + lbl + "</span>" + body + "</div>"
+    return "<div class=\'card\'><span class=\'lbl\'>" + lbl + "</span>" + body + "</div>"
 
 def banner(icon, title, note, bg):
-    return ("<div class='banner' style='background:" + bg + "'>"
+    return ("<div class=\'banner\' style=\'background:" + bg + "\'>"
             "<h2>" + icon + " " + title + "</h2><p>" + note + "</p></div>")
 
 def idx_grid(rows):
-    return "<div class='igrid'>" + rows + "</div>"
+    return "<div class=\'igrid\'>" + rows + "</div>"
 
 def idx_card(name, close, pct):
     arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "—")
     c = tc(pct)
     c_str = "{:,.2f}".format(close) if close >= 1 else "{:,.2f}".format(close)
     p_str = "{:+.2f}".format(pct)
-    return ("<div class='icard'><div class='iname'>" + name + "</div>"
-            "<div class='iclose'>" + c_str + "</div>"
-            "<div class='ipct' style='color:" + c + "'>" + arrow + " " + p_str + "%</div></div>")
+    return ("<div class=\'icard\'><div class=\'iname\'>" + name + "</div>"
+            "<div class=\'iclose\'>" + c_str + "</div>"
+            "<div class=\'ipct\' style=\'color:" + c + "\'>" + arrow + " " + p_str + "%</div></div>")
 
 def pos_bar(total_mv):
     ratio = total_mv/TOTAL_CASH*100; inv = 100-ratio
     bi_w = ratio if ratio > 5 else 5; bc_w = inv if inv > 5 else 5
-    return ("<div class='bar'>"
-            "<div class='bi' style='width:" + "{:.1f}".format(bi_w) + "%'>" + "{:.0f}".format(ratio) + "% 持仓</div>"
-            "<div class='bc' style='width:" + "{:.1f}".format(bc_w) + "%'>" + "{:.0f}".format(inv) + "% 现金</div>"
+    return ("<div class=\'bar\'>"
+            "<div class=\'bi\' style=\'width:" + "{:.1f}".format(bi_w) + "%\'>" + "{:.0f}".format(ratio) + "% 持仓</div>"
+            "<div class=\'bc\' style=\'width:" + "{:.1f}".format(bc_w) + "%\'>" + "{:.0f}".format(inv) + "% 现金</div>"
             "</div>"
-            "<div class='bleg'>"
+            "<div class=\'bleg\'>"
             "<span>📦 持仓 " + "{:,.0f}".format(total_mv) + "元</span>"
             "<span>💵 现金 " + "{:,.0f}".format(TOTAL_CASH-total_mv) + "元</span>"
             "<span>💰 总计 " + "{:,.0f}".format(TOTAL_CASH) + "元</span></div>")
@@ -557,15 +872,15 @@ def hold_table(hvals, total_mv):
         pct_t = mv/total_mv*100 if total_mv > 0 else 0
         price_str = "{:.2f}".format(h["price"]) if h["price"] else "—"
         rows += ("<tr>"
-                 "<td><div class='hname'>" + h["name"] + "</div><div class='hcode'>" + h["code"] + "</div></td>"
-                 "<td style='text-align:center'>" + str(h["shares"]) + "</td>"
-                 "<td style='text-align:right'>{:.2f}</td>".format(h["cost"]) +
-                 "<td style='text-align:right;color:" + tc(h["price"]-h["cost"]) + "'>" + price_str + "</td>"
-                 "<td style='text-align:right;color:" + tc(pnl) + "'>" + "{:+.1f}".format(pnl) + "%</td>"
-                 "<td style='text-align:right'>" + "{:.1f}".format(pct_t) + "%</td></tr>")
+                 "<td><div class=\'hname\'>" + h["name"] + "</div><div class=\'hcode\'>" + h["code"] + "</div></td>"
+                 "<td style=\'text-align:center\'>" + str(h["shares"]) + "</td>"
+                 "<td style=\'text-align:right\'>{:.2f}</td>".format(h["cost"]) +
+                 "<td style=\'text-align:right;color:" + tc(h["price"]-h["cost"]) + "\'>" + price_str + "</td>"
+                 "<td style=\'text-align:right;color:" + tc(pnl) + "\'>" + "{:+.1f}".format(pnl) + "%</td>"
+                 "<td style=\'text-align:right\'>" + "{:.1f}".format(pct_t) + "%</td></tr>")
     return ("<table>"
-            "<tr><th>名称/代码</th><th style='text-align:center'>股数</th><th style='text-align:right'>成本</th>"
-            "<th style='text-align:right'>现价</th><th style='text-align:right'>盈亏%</th><th style='text-align:right'>占总%</th></tr>"
+            "<tr><th>名称/代码</th><th style=\'text-align:center\'>股数</th><th style=\'text-align:right\'>成本</th>"
+            "<th style=\'text-align:right\'>现价</th><th style=\'text-align:right\'>盈亏%</th><th style=\'text-align:right\'>占总%</th></tr>"
             + rows + "</table>")
 
 def news_rows(tagged):
@@ -574,41 +889,9 @@ def news_rows(tagged):
         secs = "·".join(n["sectors"]) if n["sectors"] else ""
         meta = n.get("source","") + (" · "+secs if secs else "")
         txt = n["text"][:130] + ("…" if len(n["text"]) > 130 else "")
-        out += ("<div class='nitem'><div class='nico'>" + S_ICO.get(n["sentiment"],"⚖️") + "</div>"
-                "<div class='nbody'><div class='ntext'>" + txt + "</div>"
-                "<div class='nmeta'>" + meta + "</div></div></div>")
-    return out
-
-def sec_rows(summary):
-    out = ""
-    for s in summary:
-        ic = sc(s["impact"])
-        ib = "#ffeaea" if s["impact"]=="positive" else ("#e8f5ee" if s["impact"]=="negative" else "#f5f5f5")
-        np = "；".join(x["text"][:25] for x in s["news"])[:65]
-        out += ("<div class='sec'>"
-                "<div class='secname'>" + S_ICO.get(s["impact"],"⚖️") + " " + s["name"] + "</div>"
-                "<div class='secimp' style='color:" + ic + ";background:" + ib + "'>" + s["impact_txt"] + "</div>"
-                "<div class='secdesc'>" + np + "…</div></div>")
-    return out
-
-def rec_cards(recs):
-    out = ""
-    for rec in recs:
-        out += ("<div class='rcard'>"
-                "<div class='rtag' style='background:#f0f0f5;color:#333'>" + rec["tag"] + "</div>"
-                "<div class='rname'>" + rec["sector"] + "</div>"
-                "<div style='font-size:11px;color:#888;margin-bottom:6px'>" + rec["stocks"] + "</div>"
-                "<div class='rdesc'>" + rec["desc"] + "</div></div>")
-    return out
-
-def adj_rows(advices):
-    out = ""
-    for adv in advices:
-        out += ("<div class='adj'>"
-                "<div class='adji'>" + adv["icon"] + "</div>"
-                "<div class='adjb'>"
-                "<div class='adjn' style='color:" + adv["color"] + "'>" + adv["action"] + "</div>"
-                "<div class='adjt'>" + adv["text"] + "</div></div></div>")
+        out += ("<div class=\'nitem\'><div class=\'nico\'>" + S_ICO.get(n["sentiment"],"⚖️") + "</div>"
+                "<div class=\'nbody\'><div class=\'ntext\'>" + txt + "</div>"
+                "<div class=\'nmeta\'>" + meta + "</div></div></div>")
     return out
 
 def hold_analysis_rows(hvals, news_list):
@@ -638,14 +921,14 @@ def hold_analysis_rows(hvals, news_list):
         price_str = "{:.2f}元".format(price) if price else "获取中"
         pnl_str = ("+" if pnl >= 0 else "") + "{:.1f}".format(pnl)
         rel_txt = "；".join(x["text"][:28] for x in rel)[:85] if rel else "今日暂无直接相关消息，关注大盘整体走势"
-        out += ("<div class='nitem'>"
-                "<div class='nico'>" + S_ICO.get(imp,"⚖️") + "</div>"
-                "<div class='nbody'>"
-                "<div class='ntext'><b>" + h["name"] + "</b> "
-                "<span style='color:" + ic + ";background:" + ib + ";font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700'>" + it + "</span> "
-                "<span style='font-size:11px;color:#aaa'>" + price_str + " " + pnl_str + "%</span>"
+        out += ("<div class=\'nitem\'>"
+                "<div class=\'nico\'>" + S_ICO.get(imp,"⚖️") + "</div>"
+                "<div class=\'nbody\'>"
+                "<div class=\'ntext\'><b>" + h["name"] + "</b> "
+                "<span style=\'color:" + ic + ";background:" + ib + ";font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700\'>" + it + "</span> "
+                "<span style=\'font-size:11px;color:#aaa\'>" + price_str + " " + pnl_str + "%</span>"
                 "</div>"
-                "<div class='nmeta'>相关：" + rel_txt + "…</div>"
+                "<div class=\'nmeta\'>相关：" + rel_txt + "…</div>"
                 "</div></div>")
     return out
 
@@ -704,15 +987,15 @@ def build_morning_report(us_q, quotes, hvals, news_list):
     html += card("📰 重要消息面（利好 {:d} 条 / 利空 {:d} 条）".format(len(pos_n),len(neg_n)),
                  news_rows(pos_n+neg_n))
 
-    # 今日推荐
-    recs = get_recommended_sectors(avg,"morning",news_list)
-    html += card("🔍 今日推荐板块 / 个股", rec_cards(recs))
+    # 今日推荐个股（稳健型）
+    recs = recommend_stocks(news_list, avg)
+    html += card("🔍 今日推荐个股", html_recommendation_section(recs, hvals, avg, news_list))
 
     # 仓位建议
     adv = get_position_advice(avg,total_mv)
     html += card("🎯 仓位调整建议", adj_rows(adv))
 
-    html += "<div class='ft'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
+    html += "<div class=\'ft\'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
     return html, title
 
 # ━━━━ 盘尾报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -731,7 +1014,6 @@ def build_afternoon_report(quotes, hvals, news_list):
                       ("hkHSI","恒生指数"),("hkHSTECH","恒生科技")]:
         q = quotes.get(key,{}); c=q.get("close",0); p=q.get("pct",0)
         if c: idx_r += idx_card(name,c,p)
-    if c: idx_r += idx_card(name,c,p)
     html += card("📊 今日收盘", idx_grid(idx_r))
 
     # 收盘总结
@@ -761,15 +1043,15 @@ def build_afternoon_report(quotes, hvals, news_list):
     neg_n = [x for x in tagged if x["sentiment"]=="negative"]
     html += card("📰 重要消息面（利好 {:d} 条 / 利空 {:d} 条）".format(len(pos_n),len(neg_n)), news_rows(pos_n+neg_n))
 
-    # 明日推荐
-    recs = get_recommended_sectors(avg,"afternoon",news_list)
-    html += card("🔍 明日推荐板块 / 个股", rec_cards(recs))
+    # 明日推荐个股
+    recs = recommend_stocks(news_list, avg)
+    html += card("🔍 明日推荐个股", html_recommendation_section(recs, hvals, avg, news_list))
 
     # 仓位建议
     adv = get_position_advice(avg,total_mv)
     html += card("🎯 仓位调整建议", adj_rows(adv))
 
-    html += "<div class='ft'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
+    html += "<div class=\'ft\'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
     return html, title
 
 # ━━━━ 周末报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -827,49 +1109,58 @@ def build_weekend_report(news_list, a50_pct):
     html += banner(ov_ico, ov_txt,
         "共分析 {:d} 条资讯 | 利好 {:d} 条 | 利空 {:d} 条".format(len(news_list),pos_c,neg_c), ov_bg)
     html += card("📰 重要财经快讯", news_rows(tagged[:8]))
+
     if sec_summary:
-        html += card("📊 板块影响一览", sec_rows(sec_summary))
+        sec_rows_out = ""
+        for s in sec_summary:
+            ic = sc(s["impact"])
+            ib = "#ffeaea" if s["impact"]=="positive" else ("#e8f5ee" if s["impact"]=="negative" else "#f5f5f5")
+            np = "；".join(x["text"][:25] for x in s["news"])[:65]
+            sec_rows_out += ("<div class=\'sec\'>"
+                "<div class=\'secname\'>" + S_ICO.get(s["impact"],"⚖️") + " " + s["name"] + "</div>"
+                "<div class=\'secimp\' style=\'color:" + ic + ";background:" + ib + "\'>" + s["impact_txt"] + "</div>"
+                "<div class=\'secdesc\'>" + np + "…</div></div>")
+        html += card("📊 板块影响一览", sec_rows_out)
 
     hold_cards = ""
     for ha in hold_analysis:
         ic = sc(ha["impact"])
         ib = "#ffeaea" if ha["impact"]=="positive" else ("#e8f5ee" if ha["impact"]=="negative" else "#f5f5f5")
         ico = S_ICO.get(ha["impact"],"⚖️")
-        it = {"positive":"偏多","negative":"偏空","中性":"neutral"}.get(ha["impact"],"中性")
         it = {"positive":"偏多","negative":"偏空","neutral":"中性"}.get(ha["impact"],"中性")
         if ha["relevant"]:
             rel_items = "<br>".join("• " + x["text"][:55] + ("..." if len(x["text"])>55 else "") for x in ha["relevant"][:2])
         else:
             rel_items = "周末暂无相关消息，关注周一开盘"
-        hold_cards += ("<div class='nitem'><div class='nico'>" + ico + "</div><div class='nbody'>"
-            "<div class='ntext'><b>" + ha["name"] + "</b> "
-            "<span style='color:" + ic + ";background:" + ib + ";font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700'>" + it + "</span>"
-            " <span style='font-size:11px;color:#aaa'>" + str(ha["shares"]) + "股/成本{:.2f}元</span></div>".format(ha["cost"]) +
-            "<div class='nmeta'>相关：" + rel_items + "</div></div></div>")
+        hold_cards += ("<div class=\'nitem\'><div class=\'nico\'>" + ico + "</div><div class=\'nbody\'>"
+            "<div class=\'ntext\'><b>" + ha["name"] + "</b> "
+            "<span style=\'color:" + ic + ";background:" + ib + ";font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700\'>" + it + "</span>"
+            " <span style=\'font-size:11px;color:#aaa\'>" + str(ha["shares"]) + "股/成本{:.2f}元</span></div>".format(ha["cost"]) +
+            "<div class=\'nmeta\'>相关：" + rel_items + "</div></div></div>")
 
     order_rows = ""
     for ha in hold_analysis:
         imp = ha["impact"]
         if imp == "positive":
-            order_rows += ("<div style='padding:8px;background:#f0fff4;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5'>"
-                "<b style='color:#3a9e4f'>🟢 关注买入机会</b><br>"
+            order_rows += ("<div style=\'padding:8px;background:#f0fff4;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5\'>"
+                "<b style=\'color:#3a9e4f\'>🟢 关注买入机会</b><br>"
                 "积极信号：利好消息支撑，考虑逢低加仓。<br>"
                 "建议挂「价格提醒」：涨超+5%提醒减仓；跌超-5%提醒关注。</div>")
         elif imp == "negative":
-            order_rows += ("<div style='padding:8px;background:#fff5f5;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5'>"
-                "<b style='color:#e34a4a'>🔴 关注卖出风险</b><br>"
+            order_rows += ("<div style=\'padding:8px;background:#fff5f5;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5\'>"
+                "<b style=\'color:#e34a4a\'>🔴 关注卖出风险</b><br>"
                 "风险信号：利空消息压制，建议设置止损提醒。<br>"
                 "建议挂「止损提醒」：跌破成本价-5%提醒；跌破-8%确认是否离场。</div>")
         else:
-            order_rows += ("<div style='padding:8px;background:#f8f8f8;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5'>"
-                "<b style='color:#888'>🟡 观望为主</b><br>"
+            order_rows += ("<div style=\'padding:8px;background:#f8f8f8;border-radius:8px;margin-bottom:8px;font-size:12px;line-height:1.5\'>"
+                "<b style=\'color:#888\'>🟡 观望为主</b><br>"
                 "中性信号：暂无必要调整现有条件单，关注周一开盘方向再定。</div>")
 
     html += card("📋 持仓影响分析", hold_cards)
     html += card("🎯 条件单建议 & 操作参考", order_rows)
     est_total_mv = sum(h["shares"]*h["cost"] for h in HOLDINGS)
     html += card("💼 账户仓位参考", pos_bar(est_total_mv))
-    html += "<div class='ft'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
+    html += "<div class=\'ft\'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
     return html, title
 
 # ━━━━ 主入口 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
