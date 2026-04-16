@@ -1,51 +1,67 @@
-name: A股早晚报
+name: A股报告自动化
 
 on:
-  # 手动触发（测试用）
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: '发送模式 (morning / afternoon)'
-        required: true
-        default: 'morning'
-        type: choice
-        options:
-          - morning
-          - afternoon
-
-  # 定时触发（北京时间 = UTC+8）
-  # 早报 08:45 北京 → UTC 00:45
-  # 盘尾 14:45 北京 → UTC 06:45
+  # 工作日 08:45 (北京时间 = UTC+8 = 世界时+8，00:45 UTC)
   schedule:
-    - cron: '45 0 * * 1-5'   # 周一至五 08:45 北京 = 00:45 UTC
-    - cron: '45 6 * * 1-5'   # 周一至五 14:45 北京 = 06:45 UTC
-
-env:
-  TZ: Asia/Shanghai
-  SMTP_USER: ${{ secrets.SMTP_USER }}
-  SMTP_PASS: ${{ secrets.SMTP_PASS }}
+    - cron: '45 0 * * 1-5'   # 周一至五 00:45 UTC = 08:45 北京时间
+  workflow_dispatch:  # 手动触发
 
 jobs:
-  # 早报 (手动 morning / 定时第一个)
-  morning:
-    if: github.event_name != 'schedule' && github.event.inputs.mode == 'morning' || github.event.schedule == '45 0 * * 1-5'
+  morning-report:
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install requests
-      - run: python generate_report.py morning
 
-  # 盘尾简报 (手动 afternoon / 定时第二个)
-  afternoon:
-    if: github.event_name != 'schedule' && github.event.inputs.mode == 'afternoon' || github.event.schedule == '45 6 * * 1-5'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests
-      - run: python generate_report.py afternoon
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run morning report
+        env:
+          TZ: Asia/Shanghai
+        run: python3 generate_report.py morning
+
+  afternoon-report:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run afternoon report
+        env:
+          TZ: Asia/Shanghai
+        run: python3 generate_report.py afternoon
+
+  weekend-report:
+    runs-on: ubuntu-latest
+    # 周末 08:45 北京时间 (00:45 UTC 周六、周日)
+    schedule:
+      - cron: '45 0 * * 0,6'   # 周六、周日 00:45 UTC
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run weekend report
+        env:
+          TZ: Asia/Shanghai
+        run: python3 generate_report.py weekend
