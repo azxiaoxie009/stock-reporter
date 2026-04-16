@@ -40,7 +40,17 @@ def fetch_quotes():
             key = line.split('=')[0].split('_')[-1]
             val = line.split('"')[1] if '"' in line else ''
             parts = val.split(',')
-            if len(parts) >= 4:
+            if len(parts) < 4: continue
+            if key in ("hkHSI", "hkHSTECH"):
+                # 港股格式: HSI,名字,点位,前收,最高,最低,现价,涨跌额,涨跌幅%,...
+                result[key] = {
+                    "name": parts[1],
+                    "close": float(parts[6]) if parts[6] else float(parts[2]),
+                    "pct": float(parts[8]) if parts[8] else 0.0,
+                    "change": float(parts[7]) if parts[7] else 0.0
+                }
+            else:
+                # A股格式: 名字,当前点位,涨跌%,涨跌额,...
                 result[key] = {
                     "name": parts[0],
                     "close": float(parts[1]),
@@ -324,167 +334,171 @@ ul{{padding-left:16px;font-size:13px;line-height:2}}
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  周末/非交易日报告
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _bg(overall):
+    return "#fff5f5" if overall=="positive" else "#f0fff4" if overall=="negative" else "#f8f8f8"
+
 def generate_weekend_report(news_list, a50_pct):
     now = datetime.datetime.now()
     wmap = {0:'周日',1:'周一',2:'周二',3:'周三',4:'周四',5:'周五',6:'周六'}
     date_str = f"{now.year}年{now.month}月{now.day}日 {wmap[now.weekday()]}"
 
-    # ── A50大盘情绪 ──
+    # A50大盘情绪
     if a50_pct is not None:
         a50_color = trend_color(a50_pct)
         a50_icon = "▲" if a50_pct > 0 else "▼" if a50_pct < 0 else "—"
-        a50_panel = f"""<div class="a50-banner" style="background:{'#fff5f5' if a50_pct>0 else '#f0fff4' if a50_pct<0 else '#f8f8f8'}">
+        a50_bg = "#fff5f5" if a50_pct>0 else "#f0fff4" if a50_pct<0 else "#f8f8f8"
+        a50_note = "周一开盘偏多" if a50_pct>0.3 else "周一开盘偏弱" if a50_pct<-0.3 else "周一开盘平稳"
+        a50_panel = f"""<div class="a50-banner" style="background:{a50_bg}">
   <div class="a50-label">🌏 富时中国A50期货</div>
   <div class="a50-pct" style="color:{a50_color}">{a50_icon} {a50_pct:+.2f}%</div>
-  <div class="a50-note">{'周一开盘偏多' if a50_pct>0.3 else '周一开盘偏弱' if a50_pct<-0.3 else '周一开盘平稳'}</div>
+  <div class="a50-note">{a50_note}</div>
 </div>"""
     else:
         a50_panel = ""
 
-    # ── 消息分类 ──
+    # 消息分类
     positive_news, negative_news, neutral_news = [], [], []
-    sector_news = {}   # sector -> [(text, sentiment, holdings)]
-    macro_news = []
-    all_alerts = []
-
+    sector_news = {}
     for item in news_list:
         text = item["text"]
         sentiment = analyze_sentiment(text)
         sectors = match_sectors(text)
-        holders = match_holdings(text)
-        tagged = {
-            "text": text[:200],
-            "source": item.get("source", ""),
-            "sentiment": sentiment,
-            "sectors": sectors,
-            "holders": holders,
-        }
+        tagged = {"text": text[:200], "source": item.get("source",""),
+                   "sentiment": sentiment, "sectors": sectors}
         if sentiment == "positive": positive_news.append(tagged)
         elif sentiment == "negative": negative_news.append(tagged)
         else: neutral_news.append(tagged)
-        if "宏观" in sectors:
-            macro_news.append(tagged)
         for s in sectors:
             sector_news.setdefault(s, []).append(tagged)
 
-    # ── 大盘整体情绪 ──
-    total = len(news_list) or 1
     pos_n = len(positive_news); neg_n = len(negative_news)
     overall = "positive" if pos_n > neg_n + 2 else "negative" if neg_n > pos_n + 2 else "neutral"
     overall_icon = {"positive":"📈","negative":"📉","neutral":"⚖️"}[overall]
-    overall_txt = {
-        "positive": "消息面偏暖，周一谨慎看多",
-        "negative": "消息面偏空，注意控仓风险",
-        "neutral": "消息面平稳，无明确方向"
-    }[overall]
+    overall_txt = {"positive":"消息面偏暖，周一谨慎看多",
+                   "negative":"消息面偏空，注意控仓风险",
+                   "neutral":"消息面平稳，无明确方向"}[overall]
+    overall_bg = _bg(overall)
 
-    # ── 持仓影响分析 ──
+    # 持仓影响分析
     holding_analysis = []
     for h in HOLDINGS:
-        name = h["name"]
-        # 相关板块
         tags = h["tags"]
         relevant = []
         for s in tags:
             if s in sector_news:
                 relevant.extend(sector_news[s])
-        # 去除重复
         seen = set(); deduped = []
         for x in relevant:
             key = x["text"][:30]
-            if key not in seen:
-                seen.add(key); deduped.append(x)
-        relevant = deduped[:4]  # 最多4条
-
+            if key not in seen: seen.add(key); deduped.append(x)
+        relevant = deduped[:4]
         pos_rel = sum(1 for x in relevant if x["sentiment"]=="positive")
         neg_rel = sum(1 for x in relevant if x["sentiment"]=="negative")
-
-        if pos_rel > neg_rel:
-            impact = "positive"; impact_icon = "📈"; impact_txt = "偏多"
-        elif neg_rel > pos_rel:
-            impact = "negative"; impact_icon = "📉"; impact_txt = "偏空"
-        else:
-            impact = "neutral"; impact_icon = "⚖️"; impact_txt = "中性"
-
+        if pos_rel > neg_rel:   imp, imp_icon, imp_txt = "positive","📈","偏多"
+        elif neg_rel > pos_rel: imp, imp_icon, imp_txt = "negative","📉","偏空"
+        else:                  imp, imp_icon, imp_txt = "neutral","⚖️","中性"
         holding_analysis.append({
-            "name": name, "code": h["code"], "cost": h["cost"],
-            "shares": h["shares"],
-            "watch": h["watch"],
-            "impact": impact, "impact_icon": impact_icon, "impact_txt": impact_txt,
+            "name": h["name"], "code": h["code"], "cost": h["cost"],
+            "shares": h["shares"], "watch": h["watch"],
+            "impact": imp, "impact_icon": imp_icon, "impact_txt": imp_txt,
             "relevant_news": relevant,
-            "pos_rel": pos_rel, "neg_rel": neg_rel,
         })
 
-    # ── 条件单建议 ──
+    # 条件单建议
     order_suggestions = []
     for ha in holding_analysis:
-        n = ha["name"]
         imp = ha["impact"]
-        # 生成建议
         if imp == "positive":
             order_suggestions.append({
-                "name": n, "code": ha["code"],
-                "action": "🟢 关注买入机会",
-                "cond": "若周一高开回落，可挂条件单：",
-                "example": "建议挂「回落卖出」条件单：高于现价+2%触发提醒；低于成本价-5%自动触发止损提醒",
-                "alert": "积极信号：利好消息支撑，考虑逢低加仓"
+                "action":"🟢 关注买入机会",
+                "cond":"若周一高开回落，可挂条件单：",
+                "example":"建议挂「回落卖出」条件单：高于现价+2%触发提醒；低于成本价-5%自动触发止损提醒",
+                "alert":"积极信号：利好消息支撑，考虑逢低加仓"
             })
         elif imp == "negative":
             order_suggestions.append({
-                "name": n, "code": ha["code"],
-                "action": "🔴 关注卖出风险",
-                "cond": "若周一低开，可挂条件单：",
-                "example": "建议挂「回落止损」条件单：跌破成本价-5%提醒；跌破成本价-8%二次确认是否离场",
-                "alert": "风险信号：利空消息压制，建议设置止损提醒"
+                "action":"🔴 关注卖出风险",
+                "cond":"若周一低开，可挂条件单：",
+                "example":"建议挂「回落止损」条件单：跌破成本价-5%提醒；跌破成本价-8%二次确认是否离场",
+                "alert":"风险信号：利空消息压制，建议设置止损提醒"
             })
         else:
             order_suggestions.append({
-                "name": n, "code": ha["code"],
-                "action": "🟡 观望为主",
-                "cond": "暂无明确信号，保持观察：",
-                "example": "建议挂「价格提醒」：涨超+5%提醒减仓；跌超-5%提醒关注",
-                "alert": "中性信号：暂无必要调整现有条件单"
+                "action":"🟡 观望为主",
+                "cond":"暂无明确信号，保持观察：",
+                "example":"建议挂「价格提醒」：涨超+5%提醒减仓；跌超-5%提醒关注",
+                "alert":"中性信号：暂无必要调整现有条件单"
             })
 
-    # ── 板块影响摘要 ──
+    # 板块摘要
     sector_summary = []
     for sector_name in ["医疗","银行","券商","科技","新能源","消费","宏观"]:
         if sector_name in sector_news:
             items = sector_news[sector_name]
             pos_c = sum(1 for x in items if x["sentiment"]=="positive")
             neg_c = sum(1 for x in items if x["sentiment"]=="negative")
-            if pos_c > neg_c: imp_s = "positive"
-            elif neg_c > pos_c: imp_s = "negative"
-            else: imp_s = "neutral"
+            imp_s = "positive" if pos_c > neg_c else "negative" if neg_c > pos_c else "neutral"
             icon_s = {"positive":"📈","negative":"📉","neutral":"⚖️"}[imp_s]
+            imp_s_txt = {"positive":"偏多","negative":"偏空","neutral":"中性"}[imp_s]
             sector_summary.append({
-                "name": sector_name,
-                "icon": icon_s,
-                "impact": imp_s,
-                "impact_txt": {"positive":"偏多","negative":"偏空","neutral":"中性"}[imp_s],
-                "count": len(items),
+                "name": sector_name, "icon": icon_s, "impact": imp_s,
+                "impact_txt": imp_s_txt,
                 "news": items[:2]
             })
+
     sector_rows = ""
     for s in sector_summary[:6]:
         news_preview = "；".join(x["text"][:30] for x in s["news"])[:80]
-        sector_rows += f"""<div class="sector-row">
-  <div class="sector-name">{s['icon']} {s['name']}</div>
-  <div class="sector-impact" style="color:{sentiment_color(s['impact'])}">{s['impact_txt']}</div>
-  <div class="sector-news">{news_preview}…</div>
-</div>"""
+        sc = sentiment_color(s["impact"])
+        sector_rows += f"<div class='sector-row'><div class='sector-name'>{s['icon']} {s['name']}</div>"
+        sector_rows += f"<div class='sector-impact' style='color:{sc}'>{s['impact_txt']}</div>"
+        sector_rows += f"<div class='sector-news'>{news_preview}…</div></div>"
 
-    # ── 重要快讯 ──
     important_news = (positive_news[:4] + negative_news[:4])[:8]
     news_rows = ""
     for n in important_news:
         icon = SENTIMENT_ICON.get(n["sentiment"], "⚖️")
         sectors_str = "·".join(n["sectors"]) if n["sectors"] else ""
-        news_rows += f"""<div class="news-item">
-  <div class="news-icon">{icon}</div>
-  <div class="news-body">
-    <div class="news-text">{n['text'][:150]}</div>
-    <div class="news-meta">{n.get('source','')}{' · '+sectors_str if sectors_str else ''}</div>
+        news_rows += f"<div class='news-item'><div class='news-icon'>{icon}</div>"
+        news_rows += f"<div class='news-body'><div class='news-text'>{n['text'][:150]}</div>"
+        news_rows += f"<div class='news-meta'>{n.get('source','')}"
+        if sectors_str: news_rows += f" · {sectors_str}"
+        news_rows += "</div></div></div>"
+
+    # 持仓卡片HTML（无嵌套条件，全部预计算）
+    holding_cards = ""
+    for ha, s in zip(holding_analysis, order_suggestions):
+        imp = ha["impact"]
+        imp_color = sentiment_color(imp)
+        bg_color = "#ffeaea" if imp=="positive" else "#e8f5ee" if imp=="negative" else "#f5f5f5"
+        txt_color = "#c0392b" if imp=="positive" else "#27ae60" if imp=="negative" else "#666"
+        alert_bg = "#fff5f5" if imp=="positive" else "#f0fff4" if imp=="negative" else "#f8f8f8"
+        alert_border = "#e34a4a" if imp=="positive" else "#3a9e4f" if imp=="negative" else "#aaa"
+        alert_icon = "🟢" if imp=="positive" else "🔴" if imp=="negative" else "🟡"
+
+        rel_news_html = ""
+        if ha["relevant_news"]:
+            rel_items = "<br>".join(
+                f"• {x['text'][:60]}{'…' if len(x['text'])>60 else ''}"
+                for x in ha["relevant_news"][:2]
+            )
+            rel_news_html = f"<div style='font-size:11px;color:#888;margin-top:6px'>相关快讯：{rel_items}</div>"
+
+        holding_cards += f"""<div class="holding-card">
+  <div class="holding-header">
+    <span class="holding-name">{ha['name']}</span>
+    <span class="holding-tag" style="color:{txt_color};background:{bg_color}">
+      {ha['impact_icon']} {ha['impact_txt']} | {ha['watch']}
+    </span>
+  </div>
+  <div class="holding-cost">持仓 {ha['shares']} 股 | 成本价 {ha['cost']:.2f} 元</div>
+  {rel_news_html}
+  <div class="order-suggestion">
+    <div class="order-label">{s['action']}</div>
+    <div class="order-text">{s['cond']}<br>{s['example']}</div>
+  </div>
+  <div class="alert-box" style="margin-top:6px;padding:6px 10px;background:{alert_bg};border-radius:6px;font-size:12px;color:#333;border-left:3px solid {alert_border}">
+    {s['alert']}
   </div>
 </div>"""
 
@@ -496,15 +510,13 @@ def generate_weekend_report(news_list, a50_pct):
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f5f6fa;color:#222;padding:12px;max-width:600px;margin:0 auto}}
 h1{{font-size:18px;margin-bottom:12px;color:#333}}
-h2{{font-size:14px;font-weight:600;color:#333;margin-bottom:8px}}
-h3{{font-size:13px;color:#666;margin-bottom:4px}}
 .card{{background:#fff;border-radius:10px;padding:16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
 .section-title{{font-size:12px;font-weight:600;color:#888;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}}
 .a50-banner{{padding:14px 16px;border-radius:10px;margin-bottom:12px;display:flex;align-items:center;gap:12px}}
 .a50-label{{font-size:13px;font-weight:600;color:#333}}
 .a50-pct{{font-size:18px;font-weight:700}}
 .a50-note{{font-size:12px;color:#666;margin-left:auto}}
-.overall-banner{{padding:12px 16px;border-radius:10px;margin-bottom:12px;background:{'#fff5f5' if overall=='positive' else '#f0fff4' if overall=='negative' else '#f8f8f8'};text-align:center}}
+.overall-banner{{padding:12px 16px;border-radius:10px;margin-bottom:12px;background:{overall_bg};text-align:center}}
 .overall-banner strong{{font-size:16px}}
 .overall-banner p{{font-size:12px;color:#666;margin-top:4px}}
 .summary-bar{{display:flex;gap:8px;margin-top:10px;justify-content:center}}
@@ -523,19 +535,16 @@ h3{{font-size:13px;color:#666;margin-bottom:4px}}
 .sector-news{{color:#888;font-size:11px;line-height:1.4}}
 .holding-card{{border:1px solid #eee;border-radius:10px;padding:12px;margin-bottom:10px}}
 .holding-header{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
-.holding-name{{font-weight:600;font-size:14px}}
-.holding-tag{{background:{'#ffeaea' if ha['impact']=='positive' else '#e8f5ee' if ha['impact']=='negative' else '#f5f5f5'};color:{'#c0392b' if ha['impact']=='positive' else '#27ae60' if ha['impact']=='negative' else '#666'};font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}}
+.holding-name{{font-size:14px;font-weight:600}}
+.holding-tag{{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}}
 .holding-cost{{font-size:11px;color:#aaa}}
 .order-suggestion{{margin-top:8px;padding:8px;background:#f8f9fa;border-radius:6px;font-size:12px}}
 .order-label{{color:#4a90d9;font-weight:600;margin-bottom:3px}}
 .order-text{{color:#666;line-height:1.5}}
-.alert-box{{margin-top:6px;padding:6px 10px;background:{'#fff5f5' if s['action'].startswith('🟢') else '#f0fff4' if s['action'].startswith('🔴') else '#f8f8f8'};border-radius:6px;font-size:12px;color:#333;border-left:3px solid {'#e34a4a' if s['action'].startswith('🟢') else '#3a9e4f' if s['action'].startswith('🔴') else '#aaa'}}
 .footer{{text-align:center;font-size:11px;color:#aaa;margin-top:8px}}
 </style></head><body>
 <h1>{title_time}</h1>
-
 {a50_panel}
-
 <div class="overall-banner">
   <strong>{overall_icon} {overall_txt}</strong>
   <p>共分析 {len(news_list)} 条财经资讯 | 利好 {pos_n} 条 | 利空 {neg_n} 条</p>
@@ -544,56 +553,14 @@ h3{{font-size:13px;color:#666;margin-bottom:4px}}
     <span class="summary-chip neg">📉 利空 {neg_n}</span>
   </div>
 </div>
-
-<div class="card">
-  <div class="section-title">📰 重要财经快讯</div>
-  {news_rows}
-</div>
-
-<div class="card">
-  <div class="section-title">📊 板块影响一览</div>
-  {sector_rows}
-</div>
-
-<div class="card">
-  <div class="section-title">🎯 持仓影响分析 & 条件单建议</div>
-"""
-
-    for ha, s in zip(holding_analysis, order_suggestions):
-        ha_impact_color = sentiment_color(ha["impact"])
-        relevant_news_html = ""
-        if ha["relevant_news"]:
-            rel_items = "<br>".join(
-                f"• {x['text'][:60]}{'…' if len(x['text'])>60 else ''}"
-                for x in ha["relevant_news"][:2]
-            )
-            relevant_news_html = f"<div style='font-size:11px;color:#888;margin-top:6px'>相关快讯：{rel_items}</div>"
-
-        html += f"""<div class="holding-card">
-  <div class="holding-header">
-    <span class="holding-name">{ha['name']}</span>
-    <span class="holding-tag" style="color:{ha_impact_color};background:{'#ffeaea' if ha['impact']=='positive' else '#e8f5ee' if ha['impact']=='negative' else '#f5f5f5'}">
-      {ha['impact_icon']} {ha['impact_txt']} | {ha['watch']}
-    </span>
-  </div>
-  <div class="holding-cost">持仓 {ha['shares']} 股 | 成本价 {ha['cost']:.2f} 元</div>
-  {relevant_news_html}
-  <div class="order-suggestion">
-    <div class="order-label">{s['action']}</div>
-    <div class="order-text">{s['cond']}<br>{s['example']}</div>
-  </div>
-  <div class="alert-box">{s['alert']}</div>
-</div>"""
-
-    html += """
-</div>
-<div class="footer">Generated by 虾兵2号 🦞 · GitHub Actions · 非交易日报告</div>
+<div class="card"><div class="section-title">📰 重要财经快讯</div>{news_rows}</div>
+<div class="card"><div class="section-title">📊 板块影响一览</div>{sector_rows}</div>
+<div class="card"><div class="section-title">🎯 持仓影响分析 & 条件单建议</div>{holding_cards}</div>
+<div class="footer">Generated by 虾兵2号 🦞 · GitHub Actions</div>
 </body></html>"""
     return html, title_time
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  主入口
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "morning"
     is_weekend = datetime.datetime.now().weekday() >= 5
