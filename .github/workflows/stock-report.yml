@@ -1,67 +1,43 @@
 name: A股报告自动化
 
 on:
-  # 工作日 08:45 (北京时间 = UTC+8 = 世界时+8，00:45 UTC)
   schedule:
-    - cron: '45 0 * * 1-5'   # 周一至五 00:45 UTC = 08:45 北京时间
+    # 工作日 08:45 北京时间 = UTC 00:45，周一至五
+    - cron: '45 0 * * 1-5'
+    # 周末 08:45 北京时间 = UTC 00:45，周六、周日
+    - cron: '45 0 * * 0,6'
   workflow_dispatch:  # 手动触发
+
+env:
+  TZ: Asia/Shanghai
 
 jobs:
   morning-report:
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install requests
-
-      - name: Run morning report
-        env:
-          TZ: Asia/Shanghai
-        run: python3 generate_report.py morning
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+      - run: python3 generate_report.py morning
 
   afternoon-report:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install requests
-
-      - name: Run afternoon report
-        env:
-          TZ: Asia/Shanghai
-        run: python3 generate_report.py afternoon
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+      - run: python3 generate_report.py afternoon
 
   weekend-report:
     runs-on: ubuntu-latest
-    # 周末 08:45 北京时间 (00:45 UTC 周六、周日)
-    schedule:
-      - cron: '45 0 * * 0,6'   # 周六、周日 00:45 UTC
+    if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install requests
-
-      - name: Run weekend report
-        env:
-          TZ: Asia/Shanghai
-        run: python3 generate_report.py weekend
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+      - run: python3 generate_report.py weekend
