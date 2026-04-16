@@ -2,42 +2,48 @@ name: A股报告自动化
 
 on:
   schedule:
-    # 工作日 08:45 北京时间 = UTC 00:45，周一至五
+    # 工作日 08:45 北京时间 = UTC 00:45
     - cron: '45 0 * * 1-5'
-    # 周末 08:45 北京时间 = UTC 00:45，周六、周日
+    # 工作日 14:45 北京时间 = UTC 06:45
+    - cron: '45 6 * * 1-5'
+    # 周末 08:45 北京时间 = UTC 00:45
     - cron: '45 0 * * 0,6'
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '报告类型 morning | afternoon | weekend'
+        required: false
+        default: 'morning'
 
 env:
   TZ: Asia/Shanghai
 
 jobs:
-  morning-report:
+  stock-report:
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install requests
-      - run: python3 generate_report.py morning
 
-  afternoon-report:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - run: pip install requests
-      - run: python3 generate_report.py afternoon
 
-  weekend-report:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
       - run: pip install requests
-      - run: python3 generate_report.py weekend
+
+      # 根据触发方式决定报告类型：
+      # 定时触发(08:45 UTC) + 周末 → 早报/周末
+      # 定时触发(14:45 UTC)       → 下午收盘报告
+      - name: 发送早报
+        if: github.event_name == 'schedule' && github.event.schedule == '45 0 * * 1-5'
+        run: python3 generate_report.py morning
+
+      - name: 发送下午收盘报告
+        if: github.event_name == 'schedule' && github.event.schedule == '45 6 * * 1-5'
+        run: python3 generate_report.py afternoon
+
+      - name: 发送周末报告
+        if: github.event_name == 'schedule' && (github.event.schedule == '45 0 * * 0' || github.event.schedule == '45 0 * * 6')
+        run: python3 generate_report.py weekend
+
+      - name: 手动触发报告
+        if: github.event_name == 'workflow_dispatch'
+        run: python3 generate_report.py ${{ github.event.inputs.mode || 'morning' }}
