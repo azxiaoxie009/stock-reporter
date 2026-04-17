@@ -1,0 +1,122 @@
+name: 定时器保镖
+
+on:
+  schedule:
+    # 每30分钟检查一次（北京时间 = UTC 30, 0）
+    - cron: '30,0 * * * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  guardian:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install requests
+
+      - name: 检查并发送早报
+        if: github.event_name == 'schedule'
+        run: |
+          python3 << 'EOF'
+          import os, requests, datetime, subprocess
+
+          def get_cst_now():
+              from datetime import timezone, timedelta
+              CST = timezone(timedelta(hours=8))
+              return datetime.datetime.now(CST)
+
+          now = get_cst_now()
+          weekday = now.weekday()  # 0=周一, 4=周五, 5/6=周末
+          hour = now.hour
+          minute = now.minute
+          today = now.date()
+
+          print(f"[保镖] 当前时间: {now.strftime('%Y-%m-%d %H:%M')} (周{weekday+1})")
+
+          # 检查今天是否已发送过早报
+          try:
+              result = subprocess.run(
+                  ['gh', 'run', 'list', '--workflow', 'stock-report.yml',
+                   '--repo', 'azxiaoxie009/stock-reporter',
+                   '--limit', '5', '--json', 'createdAt,conclusion'],
+                  capture_output=True, text=True, check=True,
+                  env={**os.environ, 'GH_TOKEN': os.environ.get('GITHUB_TOKEN','')}
+              )
+              import json
+              runs = json.loads(result.stdout)
+              morning_sent = any(
+                  r.get('conclusion') == 'success' and
+                  'T' in r.get('createdAt','') and
+                  r.get('createdAt','')[:10] == str(today) and
+                  ('morning' in r.get('createdAt','') or
+                   datetime.datetime.fromisoformat(r['createdAt'].replace('Z','+00:00'))
+                   .astimezone(datetime.timezone(datetime.timedelta(hours=8))).hour < 11)
+                  for r in runs
+              )
+          except Exception as e:
+              print(f"[保镖] 检查历史记录失败: {e}")
+              morning_sent = False
+
+          # 增强检查：只要今天有成功的 workflow_dispatch run，就认为已发过
+          try:
+              result2 = subprocess.run(
+                  ['gh', 'api', 'repos/azxiaoxie009/stock-reporter/actions/workflows/261572052/runs?per_page=5'],
+                  capture_output=True, text=True, check=True,
+                  env={**os.environ, 'GH_TOKEN': os.environ.get('GITHUB_TOKEN','')}
+              )
+              import json
+              runs2 = json.loads(result2.stdout).get('workflow_runs', [])
+              morning_sent = any(
+                  run.get('event') == 'workflow_dispatch' and
+                  run.get('conclusion') == 'success' and
+                  run.get('created_at','')[:10] == str(today) and
+                  hour < 11  # 早报窗口：早上6点-11点
+                  for run in runs2
+              )
+              print(f"[保镖] 今天已有workflow_dispatch成功记录: {morning_sent}")
+          except Exception as e:
+              print(f"[保镖] API检查失败: {e}")
+
+          # 判断是否需要发送早报
+          is_workday = weekday < 5
+          in_morning_window = (hour >= 8 and hour < 11) or (hour == 11 and minute < 30)
+          in_afternoon_window = (hour >= 14 and hour < 16) or (hour == 16 and minute < 30)
+          is_weekend = weekday >= 5
+
+          should_send_morning = (
+              is_workday and
+              in_morning_window and
+              not morning_sent
+          )
+
+          should_send_afternoon = (
+              is_workday and
+              in_afternoon_window and
+              not morning_sent  # 如果早报也没发，afternoon也不单独发，等下个窗口
+          )
+
+          if is_workday:
+              if in_morning_window and not morning_sent:
+                  print(f"[保镖] ⚠️ 早报漏发！立即补发...")
+                  res = subprocess.run(
+                      ['gh', 'workflow', 'run', 'stock-report.yml',
+                       '--field', 'mode=morning', '--repo', 'azxiaoxie009/stock-reporter'],
+                      capture_output=True, text=True
+                  )
+                  if res.returncode == 0:
+                      print("[保镖] ✅ 早报补发触发成功！")
+                  else:
+                      print(f"[保镖] ❌ 补发失败: {res.stderr}")
+              elif in_afternoon_window and not morning_sent:
+                  print(f"[保镖] ⚠️ 早报+午报可能都漏了，检查后决定...")
+              else:
+                  print(f"[保镖] ✅ 无需补发 (早报已发送 or 不在窗口)")
+          else:
+              print(f"[保镖] 周末，跳过早报检查")
+
+          print(f"[保镖] 检查完成。morning_sent={morning_sent}, hour={hour}, weekday={weekday}")
+          EOF
