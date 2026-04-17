@@ -106,15 +106,18 @@ def fetch_us_quotes():
     return result
 
 def fetch_stock_price(code):
+    """返回 (当前价, 昨收)"""
     try:
         pre = "sh" if code.startswith("6") else "sz"
         r = requests.get(f"http://hq.sinajs.cn/list={pre}{code}",
                         headers={"Referer":"http://finance.sina.com.cn"}, timeout=10)
         r.encoding = "gbk"
         v = r.text.split('"')[1].split(",")
-        return float(v[3]) if len(v) > 3 else 0.0
+        price = float(v[3]) if len(v) > 3 else 0.0
+        yclose = float(v[2]) if len(v) > 2 else price
+        return price, yclose
     except:
-        return 0.0
+        return 0.0, 0.0
 
 def fetch_a50():
     try:
@@ -299,9 +302,11 @@ def calc_avg_pct(quotes):
 def calc_holding_values():
     result = []
     for h in HOLDINGS:
-        price = fetch_stock_price(h["code"])
+        price, yclose = fetch_stock_price(h["code"])
         mv = h["shares"] * price
-        result.append({**h,"price":price,"market_value":mv})
+        day_pct = (price / yclose - 1) * 100 if yclose else 0.0
+        result.append({**h, "price": price, "yclose": yclose,
+                       "day_pct": day_pct, "market_value": mv})
     return result
 
 
@@ -889,23 +894,28 @@ def pos_bar(total_mv):
             "<span>💵 现金 " + "{:,.0f}".format(TOTAL_CASH-total_mv) + "元</span>"
             "<span>💰 总计 " + "{:,.0f}".format(TOTAL_CASH) + "元</span></div>")
 
-def hold_table(hvals, total_mv):
+def hold_table(hvals, total_mv, label="当日"):
+    """持仓明细表，label控制列头文字（早报=上日，午报/晚报=当日）"""
     rows = ""
     for h in hvals:
         mv = h["market_value"]
         pnl = (h["price"]-h["cost"])/h["cost"]*100
         pct_t = mv/total_mv*100 if total_mv > 0 else 0
+        day_pct = h.get("day_pct", 0.0)
         price_str = "{:.2f}".format(h["price"]) if h["price"] else "—"
+        day_str = ("{:+.2f}%".format(day_pct)) if day_pct != 0.0 else "—"
         rows += ("<tr>"
                  "<td><div class=\'hname\'>" + h["name"] + "</div><div class=\'hcode\'>" + h["code"] + "</div></td>"
                  "<td style=\'text-align:center\'>" + str(h["shares"]) + "</td>"
                  "<td style=\'text-align:right\'>{:.2f}</td>".format(h["cost"]) +
                  "<td style=\'text-align:right;color:" + tc(h["price"]-h["cost"]) + "\'>" + price_str + "</td>"
+                 "<td style=\'text-align:right;color:" + tc(day_pct) + "\'>" + day_str + "</td>"
                  "<td style=\'text-align:right;color:" + tc(pnl) + "\'>" + "{:+.1f}".format(pnl) + "%</td>"
                  "<td style=\'text-align:right\'>" + "{:.1f}".format(pct_t) + "%</td></tr>")
     return ("<table>"
             "<tr><th>名称/代码</th><th style=\'text-align:center\'>股数</th><th style=\'text-align:right\'>成本</th>"
-            "<th style=\'text-align:right\'>现价</th><th style=\'text-align:right\'>盈亏%</th><th style=\'text-align:right\'>占总%</th></tr>"
+            "<th style=\'text-align:right\'>现价</th><th style=\'text-align:right\'>" + label + "涨跌</th>"
+            "<th style=\'text-align:right\'>持仓盈亏</th><th style=\'text-align:right\'>占总%</th></tr>"
             + rows + "</table>")
 
 def news_rows(tagged):
@@ -942,8 +952,10 @@ def hold_analysis_rows(hvals, news_list):
         it = {"positive":"偏多","negative":"偏空","neutral":"中性"}.get(imp,"中性")
         hval = next((v for v in hvals if v["code"]==h["code"]),{})
         price = hval.get("price",0)
+        day_pct = hval.get("day_pct", 0.0)
         pnl = (price-h["cost"])/h["cost"]*100 if price else 0
         price_str = "{:.2f}元".format(price) if price else "获取中"
+        day_str = ("+" if day_pct >= 0 else "") + "{:.2f}%".format(day_pct)
         pnl_str = ("+" if pnl >= 0 else "") + "{:.1f}".format(pnl)
         rel_txt = "；".join(x["text"][:28] for x in rel)[:85] if rel else "今日暂无直接相关消息，关注大盘整体走势"
         out += ("<div class=\'nitem\'>"
@@ -951,7 +963,9 @@ def hold_analysis_rows(hvals, news_list):
                 "<div class=\'nbody\'>"
                 "<div class=\'ntext\'><b>" + h["name"] + "</b> "
                 "<span style=\'color:" + ic + ";background:" + ib + ";font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700\'>" + it + "</span> "
-                "<span style=\'font-size:11px;color:#aaa\'>" + price_str + " " + pnl_str + "%</span>"
+                "<span style=\'font-size:11px;color:#aaa\'>" + price_str
+                + " <span style=\'color:" + tc(day_pct) + "\'>" + day_str + "</span>"
+                + " 持仓" + ("+" if pnl >= 0 else "") + "{:.1f}%".format(pnl) + "</span>"
                 "</div>"
                 "<div class=\'nmeta\'>相关：" + rel_txt + "…</div>"
                 "</div></div>")
@@ -1000,7 +1014,7 @@ def build_morning_report(us_q, quotes, hvals, news_list):
     html += card("💼 账户仓位总览", pos_bar(total_mv))
 
     # 持仓明细
-    html += card("📋 持仓个股复盘", hold_table(hvals, total_mv))
+    html += card("📋 持仓个股复盘", hold_table(hvals, total_mv, label="上日涨跌"))
 
     # 个股操盘建议
     html += card("🎯 个股操盘建议", html_stock_advice(hvals, news_list, avg, quotes))
