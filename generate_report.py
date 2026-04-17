@@ -41,12 +41,13 @@ def fetch_quotes():
             "https://push2.eastmoney.com/api/qt/ulist.np/get"
             "?fltt=2&invt=2"
             "&fields=f2,f3,f4,f15,f16,f18,f12,f14"
-            "&secids=1.000001,0.399001,0.399006"
+            "&secids=1.000001,0.399001,0.399006,1.000300,1.000985"
             "&ut=fa5fd1943c7b386f172d6893dbfba10b",
             headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
             timeout=10)
         d = r.json()
-        key_map = {"000001":"sh000001","399001":"sz399001","399006":"sz399006"}
+        key_map = {"000001":"sh000001","399001":"sz399001","399006":"sz399006",
+                   "000300":"sh000300","000985":"sh000985"}
         for item in d.get("data",{}).get("diff",[]):
             code = str(item.get("f12",""))
             key = key_map.get(code, "")
@@ -67,9 +68,11 @@ def fetch_quotes():
             "http://hq.sinajs.cn/list=hkHSI,hkHSTECH",
             headers={"Referer":"http://finance.sina.com.cn"}, timeout=10)
         r.encoding = "gbk"
+        name_map = {"hkHSI":"恒生指数","hkHSTECH":"恒生科技"}
         for line in r.text.strip().split("\n"):
             if "=" not in line: continue
-            key = line.split("=")[0].split("_")[-1]
+            raw = line.split("=")[0].strip()
+            key = raw.split("_")[-1] if "_" in raw else raw
             val = line.split('"')[1] if '"' in line else ""
             parts = val.split(",")
             if len(parts) < 9: continue
@@ -77,8 +80,10 @@ def fetch_quotes():
             prev_close = float(parts[3]) if parts[3] else close
             pct = float(parts[8]) if parts[8] else 0.0
             change = float(parts[7]) if parts[7] else 0.0
+            # 优先用东方财富返回的名称兜底，否则用 Sina 解析
+            name = name_map.get(key, key)
             result[key] = {
-                "name": parts[1], "close": close, "pct": pct,
+                "name": name, "close": close, "pct": pct,
                 "change": change, "prev_close": prev_close,
             }
     except Exception as e:
@@ -296,7 +301,7 @@ def now_str():
     return n, f"{n.year}年{n.month}月{n.day}日 {wd[n.weekday()]} {n.strftime('%H:%M')}"
 
 def calc_avg_pct(quotes):
-    vals = [float(quotes.get(k,{}).get("pct",0)) for k in ["sh000001","sz399001","sz399006"]]
+    vals = [float(quotes.get(k,{}).get("pct",0)) for k in ["sh000001","sz399001","sz399006","sh000300","sh000985"]]
     return sum(vals)/len(vals) if vals else 0.0
 
 def calc_holding_values():
@@ -997,11 +1002,10 @@ def build_morning_report(us_q, quotes, hvals, news_list):
 
     # A股指数
     idx_r = ""
-    for key,name in [("sh000001","上证指数"),("sz399001","深证成指"),("sz399006","创业板指"),
-                      ("hkHSI","恒生指数"),("hkHSTECH","恒生科技")]:
+    for key in ["sh000001","sz399001","sz399006","sh000300","sh000985","hkHSI","hkHSTECH"]:
         q = quotes.get(key,{}); c=q.get("close",0); p=q.get("pct",0)
-        if c: idx_r += idx_card(name,c,p)
-    html += card("📊 A股大盘", idx_grid(idx_r))
+        if c: idx_r += idx_card(q.get("name",key),c,p)
+    html += card("📊 大盘指数", idx_grid(idx_r))
 
     # 大盘情绪
     tr_bg = "#fff5f5" if bull else ("#f0fff4" if bear else "#f8f8f8")
@@ -1049,10 +1053,9 @@ def build_afternoon_report(quotes, hvals, news_list):
 
     # 收盘指数
     idx_r = ""
-    for key,name in [("sh000001","上证指数"),("sz399001","深证成指"),("sz399006","创业板指"),
-                      ("hkHSI","恒生指数"),("hkHSTECH","恒生科技")]:
+    for key in ["sh000001","sz399001","sz399006","sh000300","sh000985","hkHSI","hkHSTECH"]:
         q = quotes.get(key,{}); c=q.get("close",0); p=q.get("pct",0)
-        if c: idx_r += idx_card(name,c,p)
+        if c: idx_r += idx_card(q.get("name",key),c,p)
     html += card("📊 今日收盘", idx_grid(idx_r))
 
     # 收盘总结
