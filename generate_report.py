@@ -17,14 +17,15 @@ except AttributeError:
 # ── 用户配置 ─────────────────────────────────────────────
 TOTAL_CASH = 150000.0
 MAX_STOCKS = 4
+# 【重要】如有仓位调整，请通知"仓位调整"，本列表由用户确认（2026-04-17起生效）
 HOLDINGS = [
-    {"code":"002223","name":"鱼跃医疗","shares":700,"cost":32.50,
+    {"code":"002223","name":"鱼跃医疗","shares":700,"cost":36.959,
      "tags":["医药","医疗器械","养老","医保","健康","中药","集采"],
      "watch":"集采降价、医疗器械政策、老龄化"},
-    {"code":"002142","name":"宁波银行","shares":600,"cost":30.83,
+    {"code":"002142","name":"宁波银行","shares":600,"cost":29.898,
      "tags":["银行","降息","降准","房地产","信贷","LPR","息差","存款"],
      "watch":"房地产风险、净息差、业绩增速"},
-    {"code":"002736","name":"国信证券","shares":2000,"cost":12.04,
+    {"code":"002736","name":"国信证券","shares":1000,"cost":17.216,
      "tags":["券商","注册制","IPO","北交所","资本市场","两融","投行","并购"],
      "watch":"成交量、两融余额、IPO节奏"},
 ]
@@ -624,9 +625,24 @@ def recommend_stocks(news_list, avg_pct):
             "above_ma60": above_ma60,
         })
 
-    # 按评分排序，取前3名
-    candidates.sort(key=lambda x: -x["score"])
-    return candidates[:3]
+    # ── 实时价格验价（确保推荐价与当前价偏差不超过2%）─────────────
+    verified = []
+    for c in candidates:
+        try:
+            live_price, _ = fetch_stock_price(c["code"])
+            if live_price and live_price > 0:
+                gap = abs(live_price - c["price"]) / c["price"] * 100
+                if gap <= 2.0:
+                    c["price"] = round(live_price, 2)
+                    verified.append(c)
+                else:
+                    print(f"  ⚠️ [{c['code']}] 推荐价{c['price']} vs 实时价{live_price} 偏差{gap:.1f}%，已丢弃")
+            else:
+                verified.append(c)
+        except Exception:
+            verified.append(c)  # 无法验证时保留
+    verified.sort(key=lambda x: -x["score"])
+    return verified[:3]
 
 def build_order_strategy(code, name, sector, price, ma20, avg_pct):
     """
