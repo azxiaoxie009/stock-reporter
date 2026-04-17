@@ -128,63 +128,88 @@ def fetch_a50():
     return None
 
 def fetch_stock_ma(code):
-    """获取个股 MA5 / MA20 / MA60"""
-    try:
-        pre = "1" if code.startswith("6") else "0"
-        secid = f"{pre}.{code}"
-        r = requests.get(
-            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
-            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-            f"&klt=101&fqt=1&lmt=70",
-            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
-            timeout=10)
-        d = r.json()
-        klines = d.get("data",{}).get("klines",[])
-        if len(klines) < 20: return None
-        prices = [float(k.split(",")[2]) for k in klines]
-        ma5  = sum(prices[-5:])  / 5
-        ma20 = sum(prices[-20:]) / 20
-        ma60 = sum(prices[-60:]) / 60 if len(prices) >= 60 else None
-        cur  = prices[-1]
-        vol_list = [float(k.split(",")[6]) for k in klines[-20:]]
-        avg_vol = sum(vol_list) / len(vol_list)
-        vol_ratio = vol_list[-1] / avg_vol if avg_vol > 0 else 1.0
-        return {"ma5":ma5,"ma20":ma20,"ma60":ma60,"cur":cur,"vol_ratio":vol_ratio}
-    except Exception as e:
-        print(f"  {code} MA获取失败: {e}")
-        return None
+    """获取个股 MA5 / MA20 / MA60，带重试"""
+    import time
+    pre = "1" if code.startswith("6") else "0"
+    secid = f"{pre}.{code}"
+    url = (
+        f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
+        f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+        f"&klt=101&fqt=1&lmt=70"
+    )
+    headers = {
+        "Referer": "https://quote.eastmoney.com",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Connection": "keep-alive",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=5)
+            r.raise_for_status()
+            d = r.json()
+            klines = d.get("data", {}).get("klines", [])
+            if not klines or len(klines) < 20:
+                return None
+            prices = [float(k.split(",")[2]) for k in klines]
+            ma5  = sum(prices[-5:])  / 5
+            ma20 = sum(prices[-20:]) / 20
+            ma60 = sum(prices[-60:]) / 60 if len(prices) >= 60 else None
+            cur  = prices[-1]
+            vol_list = [float(k.split(",")[6]) for k in klines[-20:]]
+            avg_vol = sum(vol_list) / len(vol_list)
+            vol_ratio = vol_list[-1] / avg_vol if avg_vol > 0 else 1.0
+            return {"ma5": ma5, "ma20": ma20, "ma60": ma60, "cur": cur, "vol_ratio": vol_ratio}
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5)  # 重试前等1.5秒
+                continue
+            print(f"  {code} MA获取失败: {e}")
+            return None
 
 def fetch_stock_info_em(code):
-    """获取个股基本面 via 东方财富"""
-    try:
-        pre = "1" if code.startswith("6") else "0"
-        secid = f"{pre}.{code}"
-        r = requests.get(
-            "https://push2.eastmoney.com/api/qt/stock/get"
-            f"?secid={secid}"
-            "&fields=f58,f47,f48,f162,f167,f116,f117",
-            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
-            timeout=10)
-        d = r.json()
-        data = d.get("data",{}) or {}
-        name = data.get("f58","") or ""
-        mkt_cap = (data.get("f47",0) or 0)
-        pe_ttm  = data.get("f162",0) or 0
-        pb      = data.get("f167",0) or 0
-        profit_growth = data.get("f116",0) or 0
-        revenue_growth = data.get("f117",0) or 0
-        return {
-            "name": name,
-            "mkt_cap_yi": round(mkt_cap / 10000, 0) if mkt_cap else 0,
-            "pe_ttm": round(pe_ttm, 1) if pe_ttm and pe_ttm > 0 else None,
-            "pb": round(pb, 2) if pb and pb > 0 else None,
-            "profit_growth": round(profit_growth, 1) if profit_growth else None,
-            "revenue_growth": round(revenue_growth, 1) if revenue_growth else None,
-        }
-    except Exception as e:
-        print(f"  {code} 基本面获取失败: {e}")
-        return {}
+    """获取个股基本面 via 东方财富，带重试"""
+    import time
+    pre = "1" if code.startswith("6") else "0"
+    secid = f"{pre}.{code}"
+    url = (
+        f"https://push2.eastmoney.com/api/qt/stock/get"
+        f"?secid={secid}"
+        "&fields=f58,f47,f48,f162,f167,f116,f117"
+    )
+    headers = {
+        "Referer": "https://quote.eastmoney.com",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.get(url, headers=headers, timeout=5)
+            r.raise_for_status()
+            d = r.json()
+            data = d.get("data", {}) or {}
+            name = data.get("f58", "") or ""
+            mkt_cap = data.get("f47", 0) or 0
+            pe_ttm  = data.get("f162", 0) or 0
+            pb      = data.get("f167", 0) or 0
+            profit_growth = data.get("f116", 0) or 0
+            revenue_growth = data.get("f117", 0) or 0
+            return {
+                "name": name,
+                "mkt_cap_yi": round(mkt_cap / 10000, 0) if mkt_cap else 0,
+                "pe_ttm": round(pe_ttm, 1) if pe_ttm and pe_ttm > 0 else None,
+                "pb": round(pb, 2) if pb and pb > 0 else None,
+                "profit_growth": round(profit_growth, 1) if profit_growth else None,
+                "revenue_growth": round(revenue_growth, 1) if revenue_growth else None,
+            }
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.0)
+                continue
+            return {}
+
+    return {}
 
 def fetch_news():
     news = []
