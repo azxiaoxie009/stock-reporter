@@ -136,6 +136,172 @@ def fetch_a50():
         pass
     return None
 
+# ━━━━ 新增功能①：市场宽度（上涨/下跌家数等） ━━━━━━━━━━━━━━
+def fetch_market_breadth():
+    """
+    获取A股市场宽度指标：上涨/下跌家数、涨停/跌停家数
+    返回: {up_count, down_count, limit_up, limit_down, ad_ratio, total}
+    """
+    result = {
+        "up_count": None, "down_count": None,
+        "limit_up": None, "limit_down": None,
+        "ad_ratio": None, "total": None,
+    }
+    try:
+        r = requests.get(
+            "https://push2.eastmoney.com/api/qt/stockqot/get"
+            "?ut=fa5fd1943c7b386f172d6893dbfba10b&fltt=2"
+            "&fields=f1,f2,f3,f4,f12,f13,f14,f15,f16,f17,f18"
+            "&secids=1.000001",
+            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        d = r.json()
+        stock_list = (
+            (d.get("data") or {}).get("stockList", []) or
+            (d.get("data") or {}).get("stocks", [])
+        )
+        for s in stock_list:
+            if str(s.get("f12", "")) == "000001":
+                result["up_count"]    = s.get("f15")
+                result["down_count"]  = s.get("f16")
+                result["limit_up"]    = s.get("f17")
+                result["limit_down"]  = s.get("f18")
+    except Exception as e:
+        print(f"市场宽度获取失败: {e}")
+
+    if result["up_count"] is None:
+        try:
+            r2 = requests.get(
+                "https://push2.eastmoney.com/api/qt/ulist.np/get"
+                "?fltt=2&invt=2"
+                "&fields=f2,f3,f4,f12,f13,f14"
+                "&secids=1.000001,0.399001,0.399006,1.000300,1.000985"
+                "&ut=fa5fd1943c7b386f172d6893dbfba10b",
+                headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
+                timeout=10)
+            items = (r2.json().get("data", {}) or {}).get("diff", [])
+            up_n = sum(1 for x in items if float(x.get("f3", 0)) > 0)
+            dn_n = sum(1 for x in items if float(x.get("f3", 0)) < 0)
+            result["up_count"]   = up_n
+            result["down_count"] = dn_n
+        except Exception as e:
+            print(f"备用涨跌家数获取失败: {e}")
+
+    if result["up_count"] and result["down_count"]:
+        result["total"] = result["up_count"] + result["down_count"]
+        result["ad_ratio"] = round(result["up_count"] / result["down_count"], 2)
+    return result
+
+# ━━━━ 新增功能②：北向资金 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def fetch_north_money():
+    result = {"north_net": None, "north_pct": None, "hk_to_sh": None, "hk_to_sz": None}
+    try:
+        r = requests.get(
+            "https://push2.eastmoney.com/api/qt/kamt/get"
+            "?fields1=f2,f3,f4,f5&fields2=f1",
+            headers={"Referer":"https://quote.eastmoney.com","User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        d = r.json()
+        data  = d.get("data", {}) or {}
+        north = data.get("north", {}) or {}
+        hk2sh = data.get("hk2sh", {}) or {}
+        hk2sz = data.get("hk2sz", {}) or {}
+        result["north_net"] = north.get("f2")
+        result["north_pct"] = north.get("f3")
+        result["hk_to_sh"]  = hk2sh.get("f2")
+        result["hk_to_sz"]  = hk2sz.get("f2")
+    except Exception as e:
+        print(f"北向资金获取失败: {e}")
+    return result
+
+# ━━━━ 新增功能④：持仓阿尔法分析 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def calc_holding_alpha(hvals, quotes):
+    sh_pct = quotes.get("sh000001", {}).get("pct", 0.0)
+    result = []
+    for h in hvals:
+        day_pct = h.get("day_pct", 0.0)
+        alpha   = round(day_pct - sh_pct, 2)
+        result.append({**h, "alpha": alpha, "sh_pct": sh_pct})
+    return result
+
+# ━━━━ 新增功能③：明日操作指引 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def calc_tomorrow_guide(quotes, avg_pct, north_data):
+    sh      = quotes.get("sh000001", {})
+    sh_close = sh.get("close", 0)
+    sh_pct   = sh.get("pct", 0)
+    sh_high  = sh.get("high", 0)
+    sh_low   = sh.get("low", 0)
+    resist  = round(sh_high * 0.998, 2) if sh_high else None
+    support = round(sh_low  * 1.002, 2) if sh_low  else None
+    north_net = north_data.get("north_net")
+    if north_net is not None:
+        if north_net > 5e7:
+            north_dir = "外资大幅流入，支撑强 👍"
+        elif north_net > 0:
+            north_dir = "外资小幅净买入"
+        else:
+            north_dir = f"外资净卖出{('，留意尾盘' if north_net < -2e7 else '')}"
+    else:
+        north_dir = "北向数据获取中"
+    if avg_pct > 1.0:
+        trend_txt = "偏多"; trend_note = f"明日高开概率大，关注{resist}能否突破"
+    elif avg_pct < -1.0:
+        trend_txt = "偏空"; trend_note = f"明日低开风险大，{support}能否企稳"
+    else:
+        trend_txt = "震荡"
+        pt_range = (sh_high - sh_low) if (sh_high and sh_low) else 0
+        trend_note = f"明日方向不明，震荡格局，高低点相差{pt_range:.0f}点"
+    actions = []
+    if avg_pct > 0.5:
+        actions.append({"icon":"📈","label":"顺势操作","text":"大盘强势，可继续持股，关注证券板块轮动机会"})
+    elif avg_pct < -0.5:
+        actions.append({"icon":"🛡️","label":"防御为主","text":"大盘偏弱，控制仓位，不盲目加仓"})
+    else:
+        actions.append({"icon":"⚖️","label":"观望","text":"大盘无明显方向，震荡行情高抛低吸"})
+    if north_net is not None and north_net < -10e7:
+        actions.append({"icon":"⚠️","label":"北向警示","text":"外资大幅流出，需警惕系统性风险"})
+    return {
+        "sh_close": sh_close, "sh_pct": sh_pct,
+        "support": support, "resist": resist,
+        "trend": trend_txt, "trend_note": trend_note,
+        "north_dir": north_dir, "north_net": north_net,
+        "actions": actions, "avg_pct": avg_pct,
+    }
+
+# ━━━━ 新增功能⑤：周末财报日历 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def fetch_earnings_calendar():
+    today = datetime.date.today()
+    result = []
+    try:
+        r = requests.get(
+            "https://np-anotice-stock.eastmoney.com/api/security/ann"
+            f"?sr=-1&page_size=30&page_index=1"
+            f"&ann_type=SHA,CYB,SZA,HSZA,BJA"
+            f"&begin={today.isoformat()}"
+            f"&end={(today+datetime.timedelta(days=14)).isoformat()}"
+            f"&client_source=web",
+            headers={"Referer":"https://www.eastmoney.com","User-Agent":"Mozilla/5.0"},
+            timeout=10)
+        items = ((r.json().get("data") or {}).get("list") or [])
+        keywords = ["业绩预告","业绩快报","年报","半年报","季报","净利润","营业收入"]
+        seen = set()
+        for item in items:
+            title = item.get("title",""); date = item.get("notice_date","")
+            if any(kw in title for kw in keywords) and title not in seen:
+                seen.add(title)
+                result.append({"title": title[:90], "date": date})
+    except Exception as e:
+        print(f"财报日历获取失败: {e}")
+    macro = [
+        ("周一","中国4月LPR利率公布"),
+        ("周三","美国4月CPI通胀数据"),
+        ("周五","中国4月进出口数据"),
+    ]
+    for day, title in macro:
+        result.append({"title": f"[宏观] {title}", "date": f"本周{day}"})
+    return result[:10]
+
+
 def fetch_stock_ma(code):
     """获取个股 MA5 / MA20 / MA60，带重试"""
     import time
@@ -994,7 +1160,7 @@ def hold_analysis_rows(hvals, news_list):
 
 
 # ━━━━ 早盘报告 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def build_morning_report(us_q, quotes, hvals, news_list):
+def build_morning_report(us_q, quotes, hvals, news_list, north_data=None, breadth=None):
     n, ds = now_str()
     title = "📈 早盘快报 · " + ds
     avg = calc_avg_pct(quotes)
@@ -1032,9 +1198,65 @@ def build_morning_report(us_q, quotes, hvals, news_list):
 
     # 仓位总览
     html += card("💼 账户仓位总览", pos_bar(total_mv))
+# 北向资金（新增）
+    nn = north_data.get("north_net")
+    nn_sh = north_data.get("hk_to_sh")
+    nn_sz = north_data.get("hk_to_sz")
+    nn_pct = north_data.get("north_pct")
+    if nn is not None:
+        nn_yi = nn / 1e8
+        nn_abs = abs(nn_yi)
+        nn_color = "#e34a4a" if nn > 0 else "#3a9e4f"
+        nn_icon = "↑" if nn > 0 else "↓"
+        nn_txt = f"{nn_icon}{nn_abs:.2f}亿"
+        sh_txt = (f"沪股通 {nn_sh/1e8:+.2f}亿" if nn_sh else "")
+        sz_txt = (f"深股通 {nn_sz/1e8:+.2f}亿" if nn_sz else "")
+        sub_txt = " ".join(x for x in [sh_txt, sz_txt] if x)
+        nn_note = "今日外资主要流入板块" if nn > 0 else "今日外资主要流出板块"
+        north_html = (
+            f"<div style='text-align:center;padding:8px 0'>"
+            f"<div style='font-size:28px;font-weight:700;color:{nn_color}'>{nn_txt}</div>"
+            f"<div style='font-size:12px;color:#888;margin-top:4px'>{sub_txt or nn_note}</div></div>"
+        )
+        if nn_pct is not None:
+            north_html += f"<div style='text-align:center;font-size:11px;color:#aaa'>北向持股变化 {nn_pct:+.2f}%</div>"
+        html += card("🌊 北向资金（外资流向）", north_html)
 
     # 持仓明细
     html += card("📋 持仓个股复盘", hold_table(hvals, total_mv, label="上日涨跌"))
+# 市场宽度（新增）
+    if breadth and (breadth.get("up_count") or breadth.get("ad_ratio")):
+        up = breadth.get("up_count") or 0
+        dn = breadth.get("down_count") or 0
+        lu = breadth.get("limit_up") or 0
+        ld = breadth.get("limit_down") or 0
+        ad = breadth.get("ad_ratio")
+        # 涨跌颜色
+        ad_color = "#e34a4a" if (ad and ad > 1) else ("#3a9e4f" if (ad and ad < 1) else "#888")
+        ad_txt = f'{ad:.2f}' if ad else "—"
+        up_color = "#e34a4a" if up > dn else "#3a9e4f"
+        lu_color = "#e34a4a" if lu > 20 else ("#f39c12" if lu > 10 else "#888")
+        ld_color = "#3a9e4f" if ld > 20 else ("#f39c12" if ld > 10 else "#888")
+        breadth_html = (
+            f"<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px'>"
+            f"<div style='background:#f8f9fc;border-radius:10px;padding:10px;text-align:center'>"
+            f"<div style='font-size:11px;color:#888;margin-bottom:4px'>上涨家数</div>"
+            f"<div style='font-size:20px;font-weight:700;color:{up_color}'>{up:,}</div>"
+            f"<div style='font-size:11px;color:#aaa'>下跌 {dn:,} 家</div></div>"
+            f"<div style='background:#f8f9fc;border-radius:10px;padding:10px;text-align:center'>"
+            f"<div style='font-size:11px;color:#888;margin-bottom:4px'>涨跌比</div>"
+            f"<div style='font-size:20px;font-weight:700;color:{ad_color}'>{ad_txt}</div>"
+            f"<div style='font-size:11px;color:#aaa'>上涨/下跌</div></div>"
+            f"<div style='background:#f8f9fc;border-radius:10px;padding:10px;text-align:center'>"
+            f"<div style='font-size:11px;color:#888;margin-bottom:4px'>涨停 / 跌停</div>"
+            f"<div style='font-size:16px;font-weight:700'>"
+            f"<span style='color:{lu_color}'>▲{lu}</span> / "
+            f"<span style='color:{ld_color}'>▼{ld}</span></div>"
+            f"<div style='font-size:11px;color:#aaa'>投机情绪</div></div></div>"
+        )
+        html += card("📊 市场宽度（两市），共" + str(breadth.get("total") or "—") + "只", breadth_html)
+    else:
+        html += card("📊 市场宽度", "<div style='text-align:center;color:#888;font-size:12px'>数据获取中，稍后更新</div>")
 
     # 个股操盘建议
     html += card("🎯 个股操盘建议", html_stock_advice(hvals, news_list, avg, quotes))
@@ -1053,6 +1275,48 @@ def build_morning_report(us_q, quotes, hvals, news_list):
     # 仓位建议
     adv = get_position_advice(avg,total_mv)
     html += card("🎯 仓位调整建议", adj_rows(adv))
+# 明日操作指引（新增）
+    tg = calc_tomorrow_guide(quotes, avg, north_data)
+    sh = quotes.get("sh000001", {})
+    sh_close = tg["sh_close"]; sh_pct = tg["sh_pct"]
+    resist = tg["resist"]; support = tg["support"]
+    trend = tg["trend"]; trend_note = tg["trend_note"]
+    north_dir = tg["north_dir"]
+    acts = tg["actions"]
+    trend_color = "#e34a4a" if trend=="偏多" else ("#3a9e4f" if trend=="偏空" else "#888")
+    trend_icon  = "📈" if trend=="偏多" else ("📉" if trend=="偏空" else "⚖️")
+    # 大盘关键点位
+    point_html = ""
+    if resist and support:
+        point_html = (
+            f"<div style='display:flex;gap:16px;justify-content:center;padding:8px 0;border-top:1px solid #f0f0f0;margin-top:8px'>"
+            f"<div style='text-align:center'><div style='font-size:10px;color:#888'>上证压力</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#e34a4a'>{resist}</div></div>"
+            f"<div style='text-align:center'><div style='font-size:10px;color:#888'>上证收盘</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#1a1a2e'>{sh_close:.0f}</div></div>"
+            f"<div style='text-align:center'><div style='font-size:10px;color:#888'>上证支撑</div>"
+            f"<div style='font-size:15px;font-weight:700;color:#3a9e4f'>{support}</div></div></div>"
+        )
+    north_note = f"<div style='font-size:11px;color:#aaa;text-align:center;margin-bottom:6px'>{north_dir}</div>"
+    acts_html = ""
+    for act in acts:
+        acts_html += (
+            f"<div style='display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f5f5f5'>"
+            f"<div style='font-size:14px'>{act['icon']}</div>"
+            f"<div><div style='font-size:12px;font-weight:700;color:#1a1a2e'>{act['label']}</div>"
+            f"<div style='font-size:11px;color:#666'>{act['text']}</div></div></div>"
+        )
+    tomorrow_html = (
+        f"<div style='text-align:center;padding:10px 0'>"
+        f"<div style='display:inline-block;background:#f5f7fa;border-radius:12px;padding:6px 16px;margin-bottom:8px'>"
+        f"<span style='font-size:16px;margin-right:6px'>{trend_icon}</span>"
+        f"<span style='font-size:18px;font-weight:700;color:{trend_color}'>{trend}</span>"
+        f"<span style='font-size:12px;color:#888;margin-left:8px'>{sh_close:.0f}点 {sh_pct:+.2f}%</span></div>"
+        f"<div style='font-size:12px;color:#555;margin-bottom:4px'>{trend_note}</div></div>"
+        + north_note + point_html +
+        f"<div style='margin-top:6px'>{acts_html}</div>"
+    )
+    html += card("🔮 明日操作指引", tomorrow_html)
 
     html += "<div class=\'ft\'>Generated by 虾兵2号 🦞 · GitHub Actions云端</div></div></body></html>"
     return html, title
@@ -1094,6 +1358,35 @@ def build_afternoon_report(quotes, hvals, news_list):
 
     # 持仓个股今日影响分析
     html += card("📋 持仓个股今日影响分析", hold_analysis_rows(hvals,news_list))
+# 持仓阿尔法分析（新增）
+    alpha_vals = calc_holding_alpha(hvals, quotes)
+    sh_pct_ref = alpha_vals[0].get("sh_pct", 0) if alpha_vals else 0
+    alpha_rows = ""
+    for av in alpha_vals:
+        a = av.get("alpha", 0)
+        a_color = "#e34a4a" if a > 0 else ("#3a9e4f" if a < 0 else "#888")
+        a_icon  = "▲" if a > 0 else ("▼" if a < 0 else "—")
+        dp = av.get("day_pct", 0)
+        dp_str = f"{dp:+.2f}%"
+        name = av.get("name","")
+        code = av.get("code","")
+        alpha_rows += (
+            f"<tr>"
+            f"<td><div class='hname'>{name}</div><div class='hcode'>{code}</div></td>"
+            f"<td style='text-align:right;color:#888'>{dp_str}</td>"
+            f"<td style='text-align:right'>大盘{sh_pct_ref:+.2f}%</td>"
+            f"<td style='text-align:right;color:{a_color};font-weight:700'>{a_icon}{abs(a):.2f}%</td></tr>"
+        )
+    alpha_table = (
+        "<table>"
+        "<tr><th>名称</th><th style='text-align:right'>今日涨跌</th>"
+        "<th style='text-align:right'>基准大盘</th>"
+        "<th style='text-align:right'>超额（α）</th></tr>"
+        + alpha_rows +
+        "</table>"
+        "<div style='font-size:10px;color:#aaa;margin-top:6px'>◆ 超额收益 α > 0 表示跑赢大盘，α < 0 表示跑输大盘</div>"
+    )
+    html += card("📊 持仓超额收益（α）分析", alpha_table)
 
     # 消息面
     tagged = [{**x,"sentiment":analyze_sentiment(x["text"]),"sectors":match_sectors(x["text"])} for x in news_list]
@@ -1215,6 +1508,19 @@ def build_weekend_report(news_list, a50_pct):
                 "中性信号：暂无必要调整现有条件单，关注周一开盘方向再定。</div>")
 
     html += card("📋 持仓影响分析", hold_cards)
+# 周末增强：财报日历
+    cal = fetch_earnings_calendar()
+    if cal:
+        cal_rows = ""
+        for item in cal[:8]:
+            cal_rows += (
+                f"<div style='display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #f5f5f5'>"
+                f"<div style='font-size:11px;color:#888;width:70px;flex-shrink:0'>{item.get('date','')}</div>"
+                f"<div style='font-size:12px;color:#444;flex:1'>{item.get('title','')}</div></div>"
+            )
+        html += card("📅 未来2周财经日历（财报+宏观）", cal_rows)
+    else:
+        html += card("📅 未来2周财经日历", "<div style='text-align:center;color:#888;font-size:12px'>暂无数据</div>");
     html += card("🎯 条件单建议 & 操作参考", order_rows)
     est_total_mv = sum(h["shares"]*h["cost"] for h in HOLDINGS)
     html += card("💼 账户仓位参考", pos_bar(est_total_mv))
@@ -1222,21 +1528,29 @@ def build_weekend_report(news_list, a50_pct):
     return html, title
 
 # ━━━━ 主入口 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 def main():
-    mode = sys.argv[1] if len(sys.argv) > 1 else "morning"
+    # 根据北京时间自动判断报告类型，忽略命令行参数
     n, _ = now_str()
+    hour = n.hour
     is_weekend = n.weekday() >= 5
-    if mode == "weekend" or (mode in ("morning","afternoon") and is_weekend):
+    
+    if is_weekend:
+        mode = "weekend"
         news = fetch_news()
         a50 = fetch_a50()
         html, subject = build_weekend_report(news, a50)
-    elif mode == "morning":
+    elif hour < 12:
+        mode = "morning"
         us_q = fetch_us_quotes()
+        north_data = fetch_north_money()
+        breadth = fetch_market_breadth()
         quotes = fetch_quotes()
         hvals = calc_holding_values()
         news = fetch_news()
-        html, subject = build_morning_report(us_q, quotes, hvals, news)
+        html, subject = build_morning_report(us_q, quotes, hvals, news, north_data, breadth)
     else:
+        mode = "afternoon"
         quotes = fetch_quotes()
         hvals = calc_holding_values()
         news = fetch_news()
