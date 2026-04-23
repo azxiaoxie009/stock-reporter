@@ -343,6 +343,58 @@ def fetch_stock_ma(code):
             print(f"  {code} MA获取失败: {e}")
             return None
 
+def calc_resistance_levels(code, cur_price):
+    """
+    基于近60日K线数据，计算个股的短期/中期压力位和回测支撑位。
+    短期压力位 = 近20日最高价
+    中期压力位 = MA60 或近60日次高点（取较小值，更实际）
+    回踩支撑  = 20日均线MA20
+    使用新浪财经K线接口（东方财富接口对部分股票返回null，改用新浪）
+    """
+    import time, requests
+    # 新浪接口：sz/sh前缀
+    symbol = ("sz" + code) if not code.startswith("6") else ("sh" + code)
+    url = (f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php"
+           f"/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=5,20,60&datalen=70")
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=headers, timeout=5)
+            r.raise_for_status()
+            klines = r.json()
+            if not klines or len(klines) < 20:
+                return None
+            prices  = [float(k["close"]) for k in klines]
+            highs   = [float(k["high"])  for k in klines]
+            ma5_list  = [k.get("ma_price5")  for k in klines if k.get("ma_price5")]
+            ma20_list = [k.get("ma_price20") for k in klines if k.get("ma_price20")]
+            ma60_list = [k.get("ma_price60") for k in klines if k.get("ma_price60")]
+
+            high_20 = max(highs[-20:])
+            ma20    = ma20_list[-1]  if ma20_list else sum(prices[-20:])/20
+            ma60    = ma60_list[-1]  if ma60_list else (sum(prices[-60:])/60 if len(prices)>=60 else high_20)
+            high_60 = max(highs[-60:]) if len(highs)>=60 else high_20
+
+            # 短期阻力=20日高点，中期阻力=MA60与60日高取小（更实际）
+            short_r  = high_20
+            medium_r = min(ma60, high_60)
+            short_space  = (short_r  - cur_price) / cur_price * 100 if cur_price > 0 else 0
+            medium_space = (medium_r - cur_price) / cur_price * 100 if cur_price > 0 else 0
+            return {
+                "resistance_20d":   round(short_r,  2),
+                "resistance_60d":   round(medium_r, 2),
+                "ma20":             round(ma20,    2),
+                "short_space_pct":  round(short_space,  1),
+                "medium_space_pct": round(medium_space, 1),
+            }
+        except Exception as e:
+            if attempt < 1:
+                time.sleep(1)
+                continue
+            return None
+
+
+
 def fetch_stock_info_em(code):
     """获取个股基本面 via 东方财富，带重试"""
     import time
@@ -477,8 +529,14 @@ def calc_holding_values():
         price, yclose = fetch_stock_price(h["code"])
         mv = h["shares"] * price
         day_pct = (price / yclose - 1) * 100 if yclose else 0.0
+        # 获取短期/中期压力位（用于止盈点参考）
+        res_data = calc_resistance_levels(h["code"], price) if price > 0 else None
+        short_tp  = res_data["resistance_20d"] if res_data else None   # 短期止盈：20日高点
+        medium_tp = res_data["resistance_60d"] if res_data else None   # 中期止盈：MA60或60日高
         result.append({**h, "price": price, "yclose": yclose,
-                       "day_pct": day_pct, "market_value": mv})
+                       "day_pct": day_pct, "market_value": mv,
+                       "short_tp": short_tp, "medium_tp": medium_tp,
+                       "resistance_data": res_data})
     return result
 
 
@@ -511,7 +569,9 @@ def get_stock_advice(hval, news_list, avg_pct, quotes):
         return {"name": name, "action": "🚨 建议止损", "color": "#e34a4a", "bg": "#fff5f5",
                 "reason": f"亏损{pnl:.1f}%，已破-8%止损线！保住本金，控制亏损扩散。",
                 "signal": "negative", "price": price, "pnl": pnl, "cost": cost,
-                "watch": watch, "urgent": True, "stop_loss": round(price * 0.97, 2), "add_zone": None}
+                "watch": watch, "urgent": True, "stop_loss": round(price * 0.97, 2), "add_zone": None,
+                "short_tp": hval.get("short_tp"), "medium_tp": hval.get("medium_tp"),
+                "resistance_data": hval.get("resistance_data")}
 
     if pnl <= -5.0:
         action = "⚠️ 减仓观望" if (bear or sent_signal == "negative") else "🔔 设置止损"
@@ -521,17 +581,34 @@ def get_stock_advice(hval, news_list, avg_pct, quotes):
         return {"name": name, "action": action, "color": "#e34a4a", "bg": "#fff5f5",
                 "reason": reason, "signal": "negative", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": round(cost * 0.92, 2), "add_zone": round(price * 0.95, 2)}
+                "stop_loss": round(cost * 0.92, 2), "add_zone": round(price * 0.95, 2),
+                "short_tp": hval.get("short_tp"), "medium_tp": hval.get("medium_tp"),
+                "resistance_data": hval.get("resistance_data")}
 
     if pnl >= 15.0:
+        # 卖点：使用技术面压力位（已由 calc_holding_values 注入）
+        short_tp  = hval.get("short_tp")   # 20日高点
+        medium_tp = hval.get("medium_tp")  # MA60/60日高
+        # 构建卖点说明
+        tp_lines = []
+        if short_tp and short_tp > price:
+            gain_s = (short_tp / price - 1) * 100
+            tp_lines.append(f"短期目标 {short_tp:.2f}元（距现价+{gain_s:.1f}%）")
+        if medium_tp and medium_tp > (short_tp or 0):
+            gain_m = (medium_tp / price - 1) * 100
+            tp_lines.append(f"中期目标 {medium_tp:.2f}元（距现价+{gain_m:.1f}%）")
+        tp_str = " | ".join(tp_lines) if tp_lines else None
         reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），已超止盈线！"
         if sent_signal == "positive": reason += " 基本面+消息面均支撑，可分批止盈，先卖1/3锁利。"
         elif sent_signal == "negative": reason += " 但消息面出现利空，建议全部或大部分止盈。"
         else: reason += " 建议分批止盈：涨超20%全部走，跌破13%全部走。"
+        if tp_str: reason += f" 压力位参考：{tp_str}。"
         return {"name": name, "action": "🎯 止盈参考", "color": "#e34a4a", "bg": "#fff5f5",
                 "reason": reason, "signal": "positive", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": round(price * 0.88, 2), "add_zone": None}
+                "stop_loss": round(price * 0.88, 2), "add_zone": None,
+                "short_tp": short_tp, "medium_tp": medium_tp,
+                "resistance_data": hval.get("resistance_data")}
 
     if pnl >= 8.0:
         reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在安全垫内。"
@@ -541,7 +618,9 @@ def get_stock_advice(hval, news_list, avg_pct, quotes):
         return {"name": name, "action": "✅ 持有为主", "color": "#27ae60", "bg": "#f0fff4",
                 "reason": reason, "signal": "positive", "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
-                "stop_loss": cost, "add_zone": round(price * 1.03, 2)}
+                "stop_loss": cost, "add_zone": round(price * 1.03, 2),
+                "short_tp": hval.get("short_tp"), "medium_tp": hval.get("medium_tp"),
+                "resistance_data": hval.get("resistance_data")}
 
     if pnl >= 0:
         reason = f"盈利{pnl:.1f}%（{pnl_abs:,.0f}元），在成本上方，安心持有。"
@@ -552,7 +631,9 @@ def get_stock_advice(hval, news_list, avg_pct, quotes):
                 "reason": reason, "signal": sent_signal, "price": price, "pnl": pnl,
                 "cost": cost, "watch": watch, "urgent": False,
                 "stop_loss": cost,
-                "add_zone": None if sent_signal == "negative" else round(price * 0.98, 2)}
+                "add_zone": None if sent_signal == "negative" else round(price * 0.98, 2),
+                "short_tp": hval.get("short_tp"), "medium_tp": hval.get("medium_tp"),
+                "resistance_data": hval.get("resistance_data")}
 
     reason = f"浮亏{pnl:.1f}%（{pnl_abs:,.0f}元），仍在安全区间。"
     if watch: reason += " 关注方向：" + watch + "。"
@@ -563,7 +644,9 @@ def get_stock_advice(hval, news_list, avg_pct, quotes):
     return {"name": name, "action": "🔔 耐心持有", "color": stop_color, "bg": "#fff8e1",
             "reason": reason, "signal": sent_signal, "price": price, "pnl": pnl,
             "cost": cost, "watch": watch, "urgent": False, "stop_loss": cost,
-            "add_zone": round(price * 0.97, 2) if sent_signal == "positive" else None}
+            "add_zone": round(price * 0.97, 2) if sent_signal == "positive" else None,
+            "short_tp": hval.get("short_tp"), "medium_tp": hval.get("medium_tp"),
+            "resistance_data": hval.get("resistance_data")}
 
 def html_stock_advice(hvals, news_list, avg_pct, quotes):
     out = ""
@@ -590,6 +673,31 @@ def html_stock_advice(hvals, news_list, avg_pct, quotes):
         if stop_str or add_str:
             tags_line = "  |  ".join(x for x in [stop_str, add_str] if x)
             out += f"<div style='font-size:10px;color:#4a90d9;margin-bottom:4px'>{tags_line}</div>"
+        # 卖点展示（压力位）——从 hval 读取，所有持仓都显示
+        stp_h = hval.get("short_tp")
+        mtp_h = hval.get("medium_tp")
+        res_d = hval.get("resistance_data") or {}
+        current_price = adv.get("price", 0)
+        # 计算价格距压力位距离
+        gap_note = ""
+        if stp_h and current_price > 0:
+            gap = (stp_h / current_price - 1) * 100
+            if gap <= 5:
+                gap_note = " ⚠️接近短期压力"
+            elif gap <= 10:
+                gap_note = " 距压力+{:.0f}%".format(gap)
+        if mtp_h and mtp_h != stp_h and current_price > 0:
+            gap2 = (mtp_h / current_price - 1) * 100
+            if gap2 <= 5:
+                gap_note += " ⚠️接近中期压力"
+        if stp_h or mtp_h:
+            tp_parts = []
+            if stp_h: tp_parts.append("🎯 短期 {stp_h:.2f}元".format(stp_h=stp_h))
+            if mtp_h: tp_parts.append("🎯 中期 {mtp_h:.2f}元".format(mtp_h=mtp_h))
+            tp_html = "  ".join(tp_parts)
+            out += "<div style='font-size:10px;color:#27ae60;margin-bottom:4px'>" + tp_html + "</div>"
+            if gap_note:
+                out += "<div style='font-size:10px;color:#e34a4a;margin-bottom:4px'>" + gap_note.strip() + "</div>"
         if tags_str and tags_str != "关注：无":
             out += f"<div style='font-size:10px;color:#888'>{tags_str}</div>"
         out += "</div>"
